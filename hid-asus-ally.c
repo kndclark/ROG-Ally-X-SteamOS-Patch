@@ -1721,6 +1721,10 @@ static void ally_x_remove(struct hid_device *hdev)
 /**************************************************************************************************/
 /* ROG Ally LED control                                                                           */
 /**************************************************************************************************/
+/* Forward declarations */
+static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb);
+static int ally_rgb_apply_brightness(struct ally_rgb_dev *led_rgb);
+
 static void ally_rgb_schedule_work(struct ally_rgb_dev *led)
 {
 	unsigned long flags;
@@ -1732,45 +1736,59 @@ static void ally_rgb_schedule_work(struct ally_rgb_dev *led)
 }
 
 /*
- * The RGB still has the basic 0-3 level brightness. Since the multicolour
- * brightness is being used in place, set this to max
+ * The ROG Ally LED controller supports 4 discrete brightness levels (0-3).
+ * autonomous animations (Rainbow/Chroma) ignore R/G/B bytes and only
+ * respond to this global brightness command.
  */
-static int ally_rgb_set_bright_base_max(struct hid_device *hdev)
+static int ally_rgb_apply_brightness(struct ally_rgb_dev *led_rgb)
 {
-	u8 buf[] = { FEATURE_KBD_LED_REPORT_ID1, 0xba, 0xc5, 0xc4, 0x02 };
+	u8 buf[5];
+	int br = led_rgb->led_rgb_dev.led_cdev.brightness;
+	u8 level;
 
-	return asus_dev_set_report(hdev, buf, sizeof(buf));
+	/* Map 0-255 to 0-3 hardware levels */
+	if (br == 0)
+		level = 0;
+	else if (br <= 85)
+		level = 1;
+	else if (br <= 170)
+		level = 2;
+	else
+		level = 3;
+
+	buf[0] = FEATURE_KBD_LED_REPORT_ID1; /* 0x5D */
+	buf[1] = 0xba;
+	buf[2] = 0xc5;
+	buf[3] = 0xc4;
+	buf[4] = level;
+
+	hid_info(led_rgb->hdev, "LED brightness: level=%d\n", level);
+
+	return asus_dev_set_report(led_rgb->hdev, buf, sizeof(buf));
 }
 
 static void ally_rgb_do_work(struct work_struct *work)
 {
 	struct ally_rgb_dev *led = container_of(work, struct ally_rgb_dev, work);
-	int ret;
 	unsigned long flags;
-
-	u8 buf[16] = { [0] = FEATURE_ROG_ALLY_REPORT_ID,
-		       [1] = FEATURE_ROG_ALLY_CODE_PAGE,
-		       [2] = xpad_cmd_set_leds,
-		       [3] = xpad_cmd_len_leds };
 
 	spin_lock_irqsave(&led->lock, flags);
 	if (!led->update_rgb) {
 		spin_unlock_irqrestore(&led->lock, flags);
 		return;
 	}
-
-	for (int i = 0; i < 4; i++) {
-		buf[5 + i * 3] = drvdata.led_rgb_dev->green[i];
-		buf[6 + i * 3] = drvdata.led_rgb_dev->blue[i];
-		buf[4 + i * 3] = drvdata.led_rgb_dev->red[i];
-	}
 	led->update_rgb = false;
-
 	spin_unlock_irqrestore(&led->lock, flags);
 
-	ret = asus_dev_set_report(led->hdev, buf, sizeof(buf));
-	if (ret < 0)
-		hid_err(led->hdev, "Ally failed to set gamepad backlight: %d\n", ret);
+	/* 
+	 * Set global hardware brightness first (required for Rainbow/Chroma).
+	 */
+	ally_rgb_apply_brightness(led);
+
+	/* 
+	 * Apply the Aura effect (Mode/Speed/Color).
+	 */
+	ally_rgb_apply_effect(led);
 }
 
 static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightness)
@@ -1910,7 +1928,6 @@ static void ally_rgb_resume(void)
 		ally_rgb_restore_settings(led_rgb, led_cdev, mc_led_info);
 		led_rgb->update_rgb = true;
 		ally_rgb_schedule_work(led_rgb);
-		ally_rgb_set_bright_base_max(led_rgb->hdev);
 	}
 }
 
@@ -2067,7 +2084,7 @@ static struct ally_rgb_dev *ally_rgb_create(struct hid_device *hdev)
 	led_rgb->output_worker_initialized = true;
 	spin_lock_init(&led_rgb->lock);
 
-	ally_rgb_set_bright_base_max(hdev);
+	ally_rgb_apply_brightness(led_rgb);
 
 	/* Not marked as initialized unless ally_rgb_set() is called */
 	if (drvdata.led_rgb_data.initialized) {

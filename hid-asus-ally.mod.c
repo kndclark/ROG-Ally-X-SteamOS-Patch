@@ -20,4 +20,4 @@ MODULE_INFO(depends, "led-class-multicolor,ff-memless,hid-asus");
 MODULE_ALIAS("hid:b0003g*v00000B05p00001ABE");
 MODULE_ALIAS("hid:b0003g*v00000B05p00001B4C");
 
-MODULE_INFO(srcversion, "45A5883AF56F9B7C872A728");
+MODULE_INFO(srcversion, "77B97CF430A015E6F8B841F");
