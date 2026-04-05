@@ -1762,8 +1762,6 @@ static int ally_rgb_apply_brightness(struct ally_rgb_dev *led_rgb)
 	buf[3] = 0xc4;
 	buf[4] = level;
 
-	hid_info(led_rgb->hdev, "LED brightness: level=%d\n", level);
-
 	return asus_dev_set_report(led_rgb->hdev, buf, sizeof(buf));
 }
 
@@ -1858,9 +1856,6 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		buf[10] = 0x00; /* Ensure background colors are off (fixes Red Pulse) */
 		buf[11] = 0x00;
 		buf[12] = 0x00;
-
-		hid_info(led_rgb->hdev, "LED effect: mode=%u speed=%u (raw=0x%02x)\n",
-			 drvdata.led_rgb_data.mode, drvdata.led_rgb_data.speed, s);
 	}
 
 	ret = asus_dev_set_report(led_rgb->hdev, buf, FEATURE_ROG_ALLY_REPORT_SIZE);
@@ -1977,7 +1972,6 @@ static ssize_t rgb_speed_store(struct device *dev, struct device_attribute *attr
 	if (speed > 100)
 		return -EINVAL;
 
-	hid_info(drvdata.hdev, "rgb_speed_store: %u\n", speed);
 	drvdata.led_rgb_data.speed = speed;
 	if (drvdata.led_rgb_dev)
 		ally_rgb_apply_effect(drvdata.led_rgb_dev);
