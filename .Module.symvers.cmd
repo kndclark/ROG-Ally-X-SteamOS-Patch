@@ -1,0 +1,1 @@
+savedcmd_Module.symvers :=  /usr/lib/modules/6.18.20-valve1-1-neptune-618-ge8d678fdb3fc/build/scripts/mod/modpost -M    -a    -N  -o Module.symvers -n -T modules.order -i /usr/lib/modules/6.18.20-valve1-1-neptune-618-ge8d678fdb3fc/build/Module.symvers -e 
