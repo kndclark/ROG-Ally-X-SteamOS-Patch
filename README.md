@@ -8,9 +8,29 @@ This repository contains a patched `hid-asus-ally` kernel module for the ASUS RO
 - **Hardware Brightness Mapping**: Implemented a 4-level hardware intensity mapping (Off, Low, Med, High) for autonomous animations.
 - **Micro-animation Fixes**: Eliminated the "Red Pulse" artifact during Breathe effects.
 
-## Prerequisites
-- SteamOS with developer mode enabled.
-- Base build tools installed (`base-devel`, `linux-neptune-headers`).
+## Prerequisites & Setup (SteamOS)
+
+To build and install this module on SteamOS, you must first enable developer mode and unlock the filesystem.
+
+### 1. Unlock Filesystem & Initialize Keys
+Run these commands to allow installing system-level packages:
+
+```bash
+# Disable read-only mode
+sudo steamos-readonly disable
+
+# Initialize and populate pacman keys (required for package installation)
+sudo pacman-key --init
+sudo pacman-key --populate archlinux holo
+```
+
+### 2. Install Build Tools & Headers
+Install the necessary developer packages:
+
+```bash
+# Install base development tools and current kernel headers
+sudo pacman -S base-devel linux-neptune-618-headers
+```
 
 ## Build & Install Instructions
 
@@ -40,3 +60,4 @@ sudo dmesg | grep -i "ally"
 
 ## Credits
 Based on the ASUS ROG HID driver by Luke Jones.
+Patched for Ally X SteamOS compatibility by Antigravity AI.
