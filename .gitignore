@@ -1,0 +1,14 @@
+# Build artifacts
+*.ko
+*.ko.zst
+*.o
+*.mod
+*.mod.c
+*.mod.o
+*.order
+*.symvers
+.*.cmd
+.tmp_versions/
+
+# Git branch temporary files
+repo_cleanup
