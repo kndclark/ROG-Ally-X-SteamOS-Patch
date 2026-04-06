@@ -39,6 +39,13 @@
 #define FEATURE_KBD_LED_REPORT_ID1 0x5d
 #define FEATURE_KBD_LED_REPORT_ID2 0x5e
 
+#define ALLY_RGB_CMD_CONFIG 0xb3
+#define ALLY_RGB_CMD_APPLY  0xb4
+#define ALLY_RGB_CMD_SET    0xb5
+
+#define ALLY_RGB_SUB_BRIGHTNESS_C5 0xc5
+#define ALLY_RGB_SUB_BRIGHTNESS_C4 0xc4
+
 #define BTN_DATA_LEN 11;
 #define BTN_CODE_BYTES_LEN 8
 
@@ -385,6 +392,9 @@ struct ally_rgb_dev {
 
 	bool removed;
 	bool update_rgb;
+	u8 mode;
+	u8 speed;
+	uint8_t brightness;
 	uint8_t red[4];
 	uint8_t green[4];
 	uint8_t blue[4];
@@ -1735,31 +1745,23 @@ static void ally_rgb_schedule_work(struct ally_rgb_dev *led)
 	spin_unlock_irqrestore(&led->lock, flags);
 }
 
-/*
- * The ROG Ally LED controller supports 4 discrete brightness levels (0-3).
- * autonomous animations (Rainbow/Chroma) ignore R/G/B bytes and only
- * respond to this global brightness command.
- */
+static int ally_rgb_map_brightness(int br)
+{
+	/* Hardware levels are 0-3. If max_brightness is 3, this is direct. */
+	if (br < 0) return 0;
+	if (br > 3) return 3;
+	return br;
+}
+
 static int ally_rgb_apply_brightness(struct ally_rgb_dev *led_rgb)
 {
 	u8 buf[5];
-	int br = led_rgb->led_rgb_dev.led_cdev.brightness;
-	u8 level;
-
-	/* Map 0-255 to 0-3 hardware levels */
-	if (br == 0)
-		level = 0;
-	else if (br <= 85)
-		level = 1;
-	else if (br <= 170)
-		level = 2;
-	else
-		level = 3;
+	u8 level = ally_rgb_map_brightness(led_rgb->brightness);
 
 	buf[0] = FEATURE_KBD_LED_REPORT_ID1; /* 0x5D */
 	buf[1] = 0xba;
-	buf[2] = 0xc5;
-	buf[3] = 0xc4;
+	buf[2] = ALLY_RGB_SUB_BRIGHTNESS_C5;
+	buf[3] = ALLY_RGB_SUB_BRIGHTNESS_C4;
 	buf[4] = level;
 
 	return asus_dev_set_report(led_rgb->hdev, buf, sizeof(buf));
@@ -1798,6 +1800,7 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 	led_mc_calc_color_components(mc_cdev, brightness);
 	spin_lock_irqsave(&led->lock, flags);
 	led->update_rgb = true;
+	led->brightness = brightness;
 	/* Broadcast the single R/G/B color to all 4 physical LED zones */
 	for (int i = 0; i < 4; i++) {
 		led->red[i]   = mc_cdev->subled_info[0].brightness;
@@ -1812,7 +1815,7 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 
 static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 {
-	u8 buf[64];
+	u8 buf[FEATURE_ROG_ALLY_REPORT_SIZE];
 	int ret;
 
 	if (!led_rgb || !led_rgb->hdev)
@@ -1825,14 +1828,14 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 	 * buf[2] = zone, buf[3] = mode, buf[4-6] = RGB, buf[7] = speed
 	 */
 	buf[0] = FEATURE_ROG_ALLY_REPORT_ID;
-	buf[1] = 0xb3;
+	buf[1] = ALLY_RGB_CMD_CONFIG;
 	buf[2] = 0x00;
-	buf[3] = drvdata.led_rgb_data.mode;
+	buf[3] = led_rgb->mode;
 	buf[4] = led_rgb->red[0];
 	buf[5] = led_rgb->green[0];
 	buf[6] = led_rgb->blue[0];
 
-	if (drvdata.led_rgb_data.mode == 0) {
+	if (led_rgb->mode == 0) {
 		buf[7] = 0x00;
 		buf[8] = 0x00;
 	} else {
@@ -1843,9 +1846,9 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		 * 67-100% -> Fast (0xEF, ~5s)
 		 */
 		u8 s;
-		if (drvdata.led_rgb_data.speed <= 33)
+		if (led_rgb->speed <= 33)
 			s = 0xE1;
-		else if (drvdata.led_rgb_data.speed <= 66)
+		else if (led_rgb->speed <= 66)
 			s = 0xE4;
 		else
 			s = 0xEF;
@@ -1879,10 +1882,14 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 static void ally_rgb_store_settings(void)
 {
 	int arr_size = sizeof(drvdata.led_rgb_data.red);
-
 	struct ally_rgb_dev *led_rgb = drvdata.led_rgb_dev;
 
-	drvdata.led_rgb_data.brightness = led_rgb->led_rgb_dev.led_cdev.brightness;
+	if (!led_rgb)
+		return;
+
+	drvdata.led_rgb_data.brightness = led_rgb->brightness;
+	drvdata.led_rgb_data.mode = led_rgb->mode;
+	drvdata.led_rgb_data.speed = led_rgb->speed;
 
 	memcpy(drvdata.led_rgb_data.red, led_rgb->red, arr_size);
 	memcpy(drvdata.led_rgb_data.green, led_rgb->green, arr_size);
@@ -1899,11 +1906,16 @@ static void ally_rgb_restore_settings(struct ally_rgb_dev *led_rgb, struct led_c
 	memcpy(led_rgb->red, drvdata.led_rgb_data.red, arr_size);
 	memcpy(led_rgb->green, drvdata.led_rgb_data.green, arr_size);
 	memcpy(led_rgb->blue, drvdata.led_rgb_data.blue, arr_size);
+
+	led_rgb->mode = drvdata.led_rgb_data.mode;
+	led_rgb->speed = drvdata.led_rgb_data.speed;
+	led_rgb->brightness = drvdata.led_rgb_data.brightness;
+
 	/* Restore R/G/B intensity from the first LED zone (all zones are identical) */
 	mc_led_info[0].intensity = drvdata.led_rgb_data.red[0];
 	mc_led_info[1].intensity = drvdata.led_rgb_data.green[0];
 	mc_led_info[2].intensity = drvdata.led_rgb_data.blue[0];
-	led_cdev->brightness = drvdata.led_rgb_data.brightness;
+	led_cdev->brightness = led_rgb->brightness;
 }
 
 /* Set LEDs. Call after any setup. */
@@ -1932,20 +1944,35 @@ static const char *const ally_rgb_effect_strings[] = {
 };
 
 static ssize_t rgb_effect_show(struct device *dev, struct device_attribute *attr, char *buf) {
-	u8 mode = drvdata.led_rgb_data.mode;
+	struct ally_rgb_dev *led = drvdata.led_rgb_dev;
+	u8 mode;
+
+	if (!led)
+		return -ENODEV;
+
+	mode = led->mode;
 	if (mode >= ARRAY_SIZE(ally_rgb_effect_strings))
 		mode = 0;
 	return sysfs_emit(buf, "%s\n", ally_rgb_effect_strings[mode]);
 }
 
 static ssize_t rgb_effect_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
+	struct ally_rgb_dev *led = drvdata.led_rgb_dev;
 	int mode = sysfs_match_string(ally_rgb_effect_strings, buf);
+	unsigned long flags;
+
 	if (mode < 0)
 		return mode;
 
-	drvdata.led_rgb_data.mode = mode;
-	if (drvdata.led_rgb_dev)
-		ally_rgb_apply_effect(drvdata.led_rgb_dev);
+	if (!led)
+		return -ENODEV;
+
+	spin_lock_irqsave(&led->lock, flags);
+	led->mode = mode;
+	led->update_rgb = true;
+	spin_unlock_irqrestore(&led->lock, flags);
+
+	ally_rgb_schedule_work(led);
 
 	return count;
 }
@@ -1959,28 +1986,43 @@ static ssize_t rgb_mode_store(struct device *dev, struct device_attribute *attr,
 static ssize_t rgb_mode_index_show(struct device *dev, struct device_attribute *attr, char *buf) { return sysfs_emit(buf, "dynamic custom\n"); }
 
 static ssize_t rgb_speed_show(struct device *dev, struct device_attribute *attr, char *buf) {
-	return sysfs_emit(buf, "%d\n", drvdata.led_rgb_data.speed);
+	struct ally_rgb_dev *led = drvdata.led_rgb_dev;
+	if (!led)
+		return -ENODEV;
+	return sysfs_emit(buf, "%d\n", led->speed);
 }
 
 static ssize_t rgb_speed_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
+	struct ally_rgb_dev *led = drvdata.led_rgb_dev;
 	u8 speed;
+	unsigned long flags;
 	int ret = kstrtou8(buf, 10, &speed);
+
 	if (ret)
 		return ret;
 
-	if (speed > 100)
+	if (!led)
+		return -ENODEV;
+
+	/* Range check: discrete 0-2 for 3-part scale support */
+	if (speed > 2)
 		return -EINVAL;
 
-	drvdata.led_rgb_data.speed = speed;
-	if (drvdata.led_rgb_dev)
-		ally_rgb_apply_effect(drvdata.led_rgb_dev);
+	spin_lock_irqsave(&led->lock, flags);
+	/* Internal hardware mapping: 0 -> 0, 1 -> 50, 2 -> 100 */
+	led->speed = speed * 50;
+	if (led->speed > 100) led->speed = 100;
+	led->update_rgb = true;
+	spin_unlock_irqrestore(&led->lock, flags);
+
+	ally_rgb_schedule_work(led);
 
 	return count;
 }
 
 static ssize_t rgb_speed_range_show(struct device *dev, struct device_attribute *attr, char *buf) {
-	return sysfs_emit(buf, "0-100\n");
+	return sysfs_emit(buf, "0-2\n");
 }
 
 static ssize_t rgb_profile_show(struct device *dev, struct device_attribute *attr, char *buf) { return sysfs_emit(buf, "1\n"); }
@@ -2039,9 +2081,9 @@ static int ally_rgb_register(struct hid_device *hdev, struct ally_rgb_dev *led_r
 	led_rgb->led_rgb_dev.num_colors = 3;
 
 	led_cdev = &led_rgb->led_rgb_dev.led_cdev;
-	led_cdev->brightness = 128;
+	led_cdev->brightness = 3;
 	led_cdev->name = "go_s:rgb:joystick_rings";
-	led_cdev->max_brightness = 255;
+	led_cdev->max_brightness = 3;
 	led_cdev->brightness_set = ally_rgb_set;
 
 	if (drvdata.led_rgb_data.initialized) {
