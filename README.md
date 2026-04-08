@@ -8,31 +8,34 @@ This repository contains a patched `hid-asus-ally` kernel module for the ASUS RO
 - **Refined Speed Calibration**: Maps the 0-100 slider to precise hardware animations (Slow ~13s, Med ~9s, Fast ~5s).
 - **Global Brightness Mapping**: Implemented a 4-level intensity map (Off, Low, Med, High) that works even with autonomous animations (Rainbow/Chroma).
 
-## Prerequisites & Setup (SteamOS)
+## Installation (Recommended)
 
-To build and install this module on SteamOS, you must first enable developer mode and unlock the filesystem.
-
-### 1. Unlock Filesystem & Initialize Keys
-Run these commands to allow installing system-level packages:
+The easiest way to install and maintain the driver is using the included `install.sh` script. This script handles filesystem unlocking, dependencies, building, and reloading automatically.
 
 ```bash
-# Disable read-only mode
-sudo steamos-readonly disable
-
-# Initialize and populate pacman keys (required for package installation)
-sudo pacman-key --init
-sudo pacman-key --populate archlinux holo
+cd ally_module
+sudo ./install.sh
 ```
 
-### 2. Install Build Tools & Headers
-Install the necessary developer packages:
+> [!TIP]
+> **SteamOS Updates**: When SteamOS performs a system update, your filesystem and drivers are reset. Simply re-run `sudo ./install.sh` to restore the patch for the Ally X LED controls.
+
+---
+
+## Uninstallation
+
+To remove the patch and restore the original system driver:
 
 ```bash
-# Install base development tools and current kernel headers
-sudo pacman -S base-devel linux-neptune-618-headers
+cd ally_module
+sudo ./uninstall.sh
 ```
 
-## Build & Install Instructions
+The script will automatically restore the original driver from a backup. If no backup is available, it will offer to reinstall the official kernel package to ensure your system returns to its original state.
+
+---
+
+## Manual Build & Install Instructions (Advanced)
 
 ```bash
 cd ally_module

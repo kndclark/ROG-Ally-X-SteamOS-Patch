@@ -1,6 +1,6 @@
 obj-m += hid-asus-ally.o
 
-KDIR ?= /home/deck/staging/linux
+KDIR ?= /lib/modules/$(shell uname -r)/build
 
 all:
 	make -C $(KDIR) M=$(PWD) modules
