@@ -70,8 +70,12 @@ fi
 
 # --- 3. Initialize Keys ---
 
-if [ ! -d /etc/pacman.d/gnupg ]; then
-    log "Initializing pacman keys (this may take a minute)..."
+KEYRING_DB="/etc/pacman.d/gnupg/pubring.kbx"
+# Check if keyring is missing, or if the DB file is empty/near-empty (32 bytes is typical for empty kbx)
+if [ ! -d /etc/pacman.d/gnupg ] || [ ! -f "$KEYRING_DB" ] || [ $(stat -c%s "$KEYRING_DB" 2>/dev/null || echo 0) -le 32 ]; then
+    log "Initializing/Populating pacman keys (this may take a minute)..."
+    # Clear any stale GPG locks that might cause "not writable" errors
+    rm -f /etc/pacman.d/gnupg/*.lock 2>/dev/null
     pacman-key --init
     pacman-key --populate archlinux holo
 fi
