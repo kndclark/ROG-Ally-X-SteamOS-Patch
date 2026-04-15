@@ -1,6 +1,6 @@
-# ROG Ally X LED Driver Patch
+# ROG Ally X Driver Patch
 
-This repository contains a patched `hid-asus-ally` kernel module for the ASUS ROG Ally X, with specific fixes for LED RGB controls in SteamOS Game Mode.
+This repository contains a patched `hid-asus-ally` kernel module for the ASUS ROG Ally X, with specific fixes for LED RGB controls and vibration intensity in SteamOS Game Mode.
 
 ## Prerequisites
 
