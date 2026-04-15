@@ -401,6 +401,7 @@ struct ally_rgb_data {
 	uint8_t red[4];
 	uint8_t green[4];
 	uint8_t blue[4];
+	bool enabled;
 	bool initialized;
 };
 
@@ -1876,7 +1877,7 @@ static int ally_rgb_apply_brightness(struct ally_rgb_dev *led_rgb)
 	u8 level;
 
 	/* Map 0-255 to 0-3 hardware levels */
-	if (br == 0)
+	if (br == 0 || !drvdata.led_rgb_data.enabled)
 		level = 0;
 	else if (br <= 85)
 		level = 1;
@@ -2116,8 +2117,24 @@ static ssize_t rgb_profile_show(struct device *dev, struct device_attribute *att
 static ssize_t rgb_profile_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) { return count; }
 static ssize_t rgb_profile_range_show(struct device *dev, struct device_attribute *attr, char *buf) { return sysfs_emit(buf, "1-3\n"); }
 
-static ssize_t rgb_enabled_show(struct device *dev, struct device_attribute *attr, char *buf) { return sysfs_emit(buf, "1\n"); }
-static ssize_t rgb_enabled_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) { return count; }
+static ssize_t rgb_enabled_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", drvdata.led_rgb_data.enabled);
+}
+
+static ssize_t rgb_enabled_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	bool enabled;
+	int ret = kstrtobool(buf, &enabled);
+	if (ret)
+		return ret;
+
+	drvdata.led_rgb_data.enabled = enabled;
+	if (drvdata.led_rgb_dev)
+		ally_rgb_apply_brightness(drvdata.led_rgb_dev);
+
+	return count;
+}
 static ssize_t rgb_enabled_index_show(struct device *dev, struct device_attribute *attr, char *buf) { return sysfs_emit(buf, "0 1\n"); }
 
 static DEVICE_ATTR_RW_NAMED(rgb_effect, "effect");
@@ -2208,6 +2225,11 @@ static struct ally_rgb_dev *ally_rgb_create(struct hid_device *hdev)
 	INIT_WORK(&led_rgb->work, ally_rgb_do_work);
 	led_rgb->output_worker_initialized = true;
 	spin_lock_init(&led_rgb->lock);
+
+	/* Initialize state if not already done */
+	if (!drvdata.led_rgb_data.initialized) {
+		drvdata.led_rgb_data.enabled = true;
+	}
 
 	ally_rgb_apply_brightness(led_rgb);
 
