@@ -329,6 +329,10 @@ struct ally_gamepad_cfg {
 
 	struct js_axis_calibrations js_cal;
 	struct tr_axis_calibrations tr_cal;
+
+	u8 vibration_lut[2][128];
+	u8 vibration_min;
+	int vibration_curve;
 };
 
 /* The hatswitch outputs integers, we use them to index this X|Y pair */
@@ -550,8 +554,8 @@ static ssize_t _gamepad_apply_intensity(struct hid_device *hdev,
 	hidbuf[1] = FEATURE_ROG_ALLY_CODE_PAGE;
 	hidbuf[2] = xpad_cmd_set_vibe_intensity;
 	hidbuf[3] = xpad_cmd_len_vibe_intensity;
-	hidbuf[4] = ally_cfg->vibration_intensity[0];
-	hidbuf[5] = ally_cfg->vibration_intensity[1];
+	hidbuf[4] = 0x64; // Lock hardware gain at 100%
+	hidbuf[5] = 0x64;
 
 	ret = ally_gamepad_check_ready(hdev);
 	if (ret < 0)
@@ -564,6 +568,44 @@ static ssize_t _gamepad_apply_intensity(struct hid_device *hdev,
 report_fail:
 	kfree(hidbuf);
 	return ret;
+}
+
+static void _gamepad_update_vibe_luts(struct ally_gamepad_cfg *ally_cfg)
+{
+	int i, side;
+	u32 intensity, floor, numer, denom, val;
+	int k;
+
+	for (side = 0; side < 2; side++) {
+		intensity = (ally_cfg->vibration_intensity[side] * 127) / 100;
+		floor = (ally_cfg->vibration_min * 127) / 100;
+		k = ally_cfg->vibration_curve;
+
+		for (i = 0; i < 128; i++) {
+			if (i == 0) {
+				ally_cfg->vibration_lut[side][i] = 0;
+				continue;
+			}
+			/* If intensity is lower than floor, we cap at intensity but keep it as a flat floor */
+			if (intensity <= floor) {
+				ally_cfg->vibration_lut[side][i] = intensity;
+				continue;
+			}
+
+			/*
+			 * Rational Curve: y = floor + (intensity - floor) * (i * (100 + k)) / (127 * 100 + k * i)
+			 * Use u64 for the intermediate product to ensure maximum precision and prevent
+			 * overflow, then apply a safety check for the denominator.
+			 */
+			numer = i * (100 + k);
+			denom = (127 * 100) + (k * i);
+			if (denom == 0)
+				val = floor + (intensity - floor);
+			else
+				val = floor + (u32)div_u64((u64)(intensity - floor) * numer, denom);
+			ally_cfg->vibration_lut[side][i] = (u8)clamp_val(val, 0, 127);
+		}
+	}
 }
 
 static ssize_t gamepad_vibration_intensity_show(struct device *dev,
@@ -595,11 +637,12 @@ static ssize_t gamepad_vibration_intensity_store(struct device *dev,
 	if (sscanf(buf, "%d %d", &left, &right) != 2)
 		return -EINVAL;
 
-	if (left > 64 || right > 64)
+	if (left > 100 || right > 100)
 		return -EINVAL;
 
 	ally_cfg->vibration_intensity[0] = left;
 	ally_cfg->vibration_intensity[1] = right;
+	_gamepad_update_vibe_luts(ally_cfg);
 
 	ret = _gamepad_apply_intensity(hdev, ally_cfg);
 	if (ret < 0)
@@ -609,6 +652,79 @@ static ssize_t gamepad_vibration_intensity_store(struct device *dev,
 }
 
 ALLY_DEVICE_ATTR_RW(gamepad_vibration_intensity, vibration_intensity);
+
+static ssize_t gamepad_vibration_floor_show(struct device *dev,
+					     struct device_attribute *attr, char *buf)
+{
+	struct ally_gamepad_cfg *ally_cfg = drvdata.gamepad_cfg;
+
+	if (!drvdata.gamepad_cfg)
+		return -ENODEV;
+
+	return sysfs_emit(buf, "%d\n", ally_cfg->vibration_min);
+}
+
+static ssize_t gamepad_vibration_floor_store(struct device *dev,
+					      struct device_attribute *attr,
+					      const char *buf, size_t count)
+{
+	struct ally_gamepad_cfg *ally_cfg = drvdata.gamepad_cfg;
+	int ret, val;
+
+	if (!drvdata.gamepad_cfg)
+		return -ENODEV;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < 0 || val > 100)
+		return -EINVAL;
+
+	if (val > max(ally_cfg->vibration_intensity[0], ally_cfg->vibration_intensity[1]))
+		val = max(ally_cfg->vibration_intensity[0], ally_cfg->vibration_intensity[1]);
+
+	ally_cfg->vibration_min = val;
+	_gamepad_update_vibe_luts(ally_cfg);
+
+	return count;
+}
+ALLY_DEVICE_ATTR_RW(gamepad_vibration_floor, vibration_floor);
+
+static ssize_t gamepad_vibration_curve_show(struct device *dev,
+					     struct device_attribute *attr, char *buf)
+{
+	struct ally_gamepad_cfg *ally_cfg = drvdata.gamepad_cfg;
+
+	if (!drvdata.gamepad_cfg)
+		return -ENODEV;
+
+	return sysfs_emit(buf, "%d\n", ally_cfg->vibration_curve);
+}
+
+static ssize_t gamepad_vibration_curve_store(struct device *dev,
+					      struct device_attribute *attr,
+					      const char *buf, size_t count)
+{
+	struct ally_gamepad_cfg *ally_cfg = drvdata.gamepad_cfg;
+	int ret, val;
+
+	if (!drvdata.gamepad_cfg)
+		return -ENODEV;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < -100 || val > 500)
+		return -EINVAL;
+
+	ally_cfg->vibration_curve = val;
+	_gamepad_update_vibe_luts(ally_cfg);
+
+	return count;
+}
+ALLY_DEVICE_ATTR_RW(gamepad_vibration_curve, vibration_curve);
 
 /* ANALOGUE DEADZONES *****************************************************************************/
 static ssize_t _gamepad_apply_deadzones(struct hid_device *hdev,
@@ -1306,6 +1422,8 @@ static struct attribute *gamepad_device_attrs[] = {
 	&dev_attr_gamepad_apply_all.attr,
 	&dev_attr_gamepad_vibration_intensity.attr,
 	&dev_attr_gamepad_vibration_intensity_index.attr,
+	&dev_attr_gamepad_vibration_floor.attr,
+	&dev_attr_gamepad_vibration_curve.attr,
 	&dev_attr_mcu_version.attr,
 	NULL
 };
@@ -1384,8 +1502,12 @@ static struct ally_gamepad_cfg *ally_gamepad_cfg_create(struct hid_device *hdev)
 	_gamepad_apply_btn_pair(hdev, ally_cfg, btn_pair_m1_m2);
 	gamepad_get_calibration(hdev);
 
-	ally_cfg->vibration_intensity[0] = 0x64;
-	ally_cfg->vibration_intensity[1] = 0x64;
+	ally_cfg->vibration_intensity[0] = 8;
+	ally_cfg->vibration_intensity[1] = 8;
+	ally_cfg->vibration_min = 8;
+	ally_cfg->vibration_curve = 400;
+	_gamepad_update_vibe_luts(ally_cfg);
+
 	_gamepad_set_deadzones_default(ally_cfg);
 	_gamepad_set_anti_deadzones_default(ally_cfg);
 	_gamepad_set_js_response_curves_default(ally_cfg);
@@ -1516,8 +1638,15 @@ static int ally_x_play_effect(struct input_dev *idev, void *data, struct ff_effe
 		return 0;
 
 	spin_lock_irqsave(&ally_x->lock, flags);
-	ally_x->ff_packet->ff.magnitude_strong = effect->u.rumble.strong_magnitude / 512;
-	ally_x->ff_packet->ff.magnitude_weak = effect->u.rumble.weak_magnitude / 512;
+	if (drvdata.gamepad_cfg) {
+		ally_x->ff_packet->ff.magnitude_strong =
+			drvdata.gamepad_cfg->vibration_lut[0][effect->u.rumble.strong_magnitude >> 9];
+		ally_x->ff_packet->ff.magnitude_weak =
+			drvdata.gamepad_cfg->vibration_lut[1][effect->u.rumble.weak_magnitude >> 9];
+	} else {
+		ally_x->ff_packet->ff.magnitude_strong = effect->u.rumble.strong_magnitude / 512;
+		ally_x->ff_packet->ff.magnitude_weak = effect->u.rumble.weak_magnitude / 512;
+	}
 	ally_x->update_ff = true;
 	spin_unlock_irqrestore(&ally_x->lock, flags);
 
@@ -2057,8 +2186,8 @@ static int ally_rgb_register(struct hid_device *hdev, struct ally_rgb_dev *led_r
 
 	led_cdev = &led_rgb->led_rgb_dev.led_cdev;
 	led_cdev->brightness = 128;
-	/* TODO: update below "go_s" workaround, to show LED customization menu in 
-	/* SteamOS Game Mode, once asus UI profile is included in upstream kernel */
+	/* TODO: update below "go_s" workaround, to show LED customization menu in
+	   SteamOS Game Mode, once asus UI profile is included in upstream kernel */
 	led_cdev->name = "go_s:rgb:joystick_rings"; 
 	led_cdev->max_brightness = 255;
 	led_cdev->brightness_set = ally_rgb_set;

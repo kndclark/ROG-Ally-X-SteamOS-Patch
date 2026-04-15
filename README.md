@@ -2,11 +2,69 @@
 
 This repository contains a patched `hid-asus-ally` kernel module for the ASUS ROG Ally X, with specific fixes for LED RGB controls in SteamOS Game Mode.
 
+## Prerequisites
+
+Before installing, ensure the following:
+
+- **User deck password set**  
+  SteamOS requires a user password for administrative (`sudo`) actions.  
+  To set it, open a terminal and run:
+  ```bash
+  passwd
+  ```
+
+- **Git installed**  
+  SteamOS does not always include Git by default. To install it:
+
+  1. Disable the read-only filesystem:
+     ```bash
+     sudo steamos-readonly disable
+     ```
+
+  2. Initialize and populate the package manager keys:
+     ```bash
+     sudo pacman-key --init
+     sudo pacman-key --populate archlinux
+     ```
+
+  3. Install Git:
+     ```bash
+     sudo pacman -S git
+     ```
+  4. Clone the repo:
+     ```bash
+     git clone https://github.com/kndclark/ally_module.git
+
+> [!TIP]
+> **Clone to persistent storage**: When SteamOS performs a system update, your filesystem and drivers are reset, but your `/home` directory will be preserved; it is recommended to clone this repo to that location.
+---
+
+  5. (Optional) Re-enable the read-only filesystem:
+     ```bash
+     sudo steamos-readonly enable
+     ```
+
 ## Features
 - **SteamOS Native Integration**: Added sysfs stubs that allow the SteamOS Game Mode LED settings to control effect type, speed, and brightness out-of-the-box.
 - **Improved Effect Support**: Unlocked support for `monocolor`, `breathe`, `chroma`, and `rainbow` animations.
 - **Refined Speed Calibration**: Maps the 0-100 slider to precise hardware animations (Slow ~13s, Med ~9s, Fast ~5s).
 - **Global Brightness Mapping**: Implemented a 4-level intensity map (Off, Low, Med, High) that works even with autonomous animations (Rainbow/Chroma).
+- **Haptic Response Curve**: Introduced a non-linear software curve system to preserve subtle haptics while keeping heavy rumble quiet.
+- **Full Range Unlocked**: Corrected sysfs limits for both Vibration and Deadzones to allow the full 0-100% range.
+- **Pure Software Scaling**: Decoupled hardware intensity to prevent "Double Scaling," preserving high haptic resolution at low power levels.
+
+## Configuration
+
+### Vibration & Haptics
+The patched driver includes a sophisticated haptic engine designed to fix the "noisy motors" issue on the Ally X without losing detail.
+
+- `/sys/devices/.../vibration_intensity`: Sets the **Master Cap** (Max power).
+- `/sys/devices/.../vibration_floor`: Sets the **Feelable Minimum**. Any vibration from a game will be boosted to at least this level to prevent it being lost.
+- `/sys/devices/.../vibration_curve`: Adjusts the **Response Shape**. High values (e.g., 300) boost the low-end heavily, making subtle effects like wind or footsteps feel tactile even at low overall intensities.
+
+> [!NOTE]
+> Current defaults (calibrated on the Ally X): Intensity=8, Floor=8, Curve=400.
+
 
 ## Installation (Recommended)
 
@@ -57,7 +115,7 @@ sudo depmod -a
 sudo modprobe -r hid_asus_ally
 sudo modprobe hid_asus_ally
 
-# 6. Verify logs
+# 6. Verify logs (if enabled)
 sudo dmesg | grep -i "ally"
 ```
 

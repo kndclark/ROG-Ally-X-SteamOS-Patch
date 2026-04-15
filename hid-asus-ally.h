@@ -298,7 +298,7 @@ enum btn_pair_index {
 			return -ENODEV;                                        \
 		if (sscanf(buf, "%d %d", &inner, &outer) != 2)                 \
 			return -EINVAL;                                        \
-		if (inner > 64 || outer > 64 || inner > outer)                 \
+		if (inner > 100 || outer > 100 || inner > outer)                 \
 			return -EINVAL;                                        \
 		ally_cfg->_axis_name.inner = inner;                            \
 		ally_cfg->_axis_name.outer = outer;                            \
