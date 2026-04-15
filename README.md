@@ -115,7 +115,7 @@ sudo depmod -a
 sudo modprobe -r hid_asus_ally
 sudo modprobe hid_asus_ally
 
-# 6. Verify logs
+# 6. Verify logs (if enabled)
 sudo dmesg | grep -i "ally"
 ```
 
