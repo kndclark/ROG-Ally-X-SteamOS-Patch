@@ -1342,7 +1342,7 @@ static int asus_input_configured(struct hid_device *hdev, struct hid_input *hi)
 			input->name = "Asus Touchpad Keys";
 			drvdata->tp_kbd_input = input;
 			return 0;
-		case INPUT_REPORT_ID:
+		case ASUS_REPORT_ID_INPUT:
 			break; /* Touchpad report, handled below */
 		default:
 			return 0; /* Ignore other reports */
