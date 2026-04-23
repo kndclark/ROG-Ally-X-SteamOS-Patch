@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# ROG Ally X LED Module Uninstaller for SteamOS
+# ASUS Unified HID Driver Uninstaller for SteamOS
 # This script reverts the driver patch and restores the original system driver.
 
 set -e
 
 # --- Configuration ---
-MODULE_NAME="hid-asus-ally"
+MODULE_NAME="hid-asus"
 MODULE_FILE="${MODULE_NAME}.ko"
 MODULE_ZST="${MODULE_FILE}.zst"
 INSTALL_PATH="/lib/modules/$(uname -r)/kernel/drivers/hid/"

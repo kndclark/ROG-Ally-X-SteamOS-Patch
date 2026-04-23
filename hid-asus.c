@@ -46,28 +46,30 @@ MODULE_DESCRIPTION("Asus HID Keyboard and TouchPad");
 
 #define E1239T_TP_TOGGLE_REPORT_ID 0x05
 #define T100CHI_MOUSE_REPORT_ID 0x06
-#define FEATURE_REPORT_ID 0x0d
-#define INPUT_REPORT_ID 0x5d
 #define HID_USAGE_PAGE_VENDOR 0xff310000
-#define FEATURE_KBD_REPORT_ID 0x5a
-#define FEATURE_KBD_REPORT_SIZE 64
-#define FEATURE_KBD_LED_REPORT_ID1 0x5d
-#define FEATURE_KBD_LED_REPORT_ID2 0x5e
+#define ASUS_REPORT_ID_HAPTIC 0x0d
+#define ASUS_REPORT_ID_FEATURE 0x5a
+#define ASUS_REPORT_ID_INPUT 0x5d
+#define ASUS_REPORT_ID_LED_BACKLIGHT 0x5d
+#define ASUS_REPORT_ID_LED_AURA1 0x5d
+#define ASUS_REPORT_ID_LED_AURA2 0x5e
 
-#define ASUS_FEATURE_REPORT_SIZE 64
+#define ROG_ALLY_REPORT_SIZE 64
 #define ROG_ALLY_X_MIN_MCU 313
 #define ROG_ALLY_MIN_MCU 319
+
+#define ASUS_AURA_CMD_SET_EFFECT 0xb3
+#define ASUS_AURA_CMD_COMMIT_SET 0xb5
+#define ASUS_AURA_CMD_COMMIT_APPLY 0xb4
 
 #define SUPPORT_KBD_BACKLIGHT BIT(0)
 #define SUPPORT_AURA_MC BIT(1)
 
-#define FEATURE_ROG_ALLY_CODE_PAGE 0xd1
-
 static const u8 EC_INIT_STRING[] = { 0x5a, 'A', 'S', 'U', 'S', ' ', 'T', 'e','c', 'h', '.', 'I', 'n', 'c', '.', '\0' };
-/* 0xb4 = Aura apply command (ROG Ally EC) */
-static const u8 EC_MODE_LED_APPLY[] = { 0x5a, 0xb4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-/* 0xb5 = Aura set command (ROG Ally EC) */
-static const u8 EC_MODE_LED_SET[] = { 0x5a, 0xb5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+/* 0xb4 = Aura apply command (ROG Ally EC protocol) */
+static const u8 EC_MODE_LED_APPLY[] = { 0x5a, ASUS_AURA_CMD_COMMIT_APPLY, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+/* 0xb5 = Aura set command (ROG Ally EC protocol) */
+static const u8 EC_MODE_LED_SET[] = { 0x5a, ASUS_AURA_CMD_COMMIT_SET, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 /* 0x0d = Force Feedback report ID, 0x0f = all motors off */
 static const u8 FORCE_FEEDBACK_OFF[] = { 0x0d, 0x0f, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0xeb };
 
@@ -101,7 +103,7 @@ static const u8 FORCE_FEEDBACK_OFF[] = { 0x0d, 0x0f, 0x00, 0x00, 0x00, 0x00, 0xf
 #define QUIRK_MEDION_E1239T		BIT(10)
 #define QUIRK_ROG_NKEY_KEYBOARD		BIT(11)
 #define QUIRK_ROG_CLAYMORE_II_KEYBOARD BIT(12)
-#define QUIRK_ASUS_CONTROLLER		BIT(13)
+#define QUIRK_ROG_ALLY_XPAD		BIT(13)
 #define QUIRK_ROG_NKEY_ID1ID2_INIT		BIT(14)
 
 #define I2C_KEYBOARD_QUIRKS			(QUIRK_FIX_NOTEBOOK_REPORT | \
@@ -404,7 +406,7 @@ static int asus_raw_event(struct hid_device *hdev,
 	if (drvdata->battery && data[0] == BATTERY_REPORT_ID)
 		return asus_report_battery(drvdata, data, size);
 
-	if (drvdata->tp && data[0] == INPUT_REPORT_ID)
+	if (drvdata->tp && data[0] == ASUS_REPORT_ID_INPUT)
 		return asus_report_input(drvdata, data, size);
 
 	if (drvdata->quirks & QUIRK_MEDION_E1239T)
@@ -414,9 +416,9 @@ static int asus_raw_event(struct hid_device *hdev,
 	 * Skip these report ID, the device emits a continuous stream associated
 	 * with the AURA mode it is in which looks like an 'echo'.
 	 */
-	if (report->id == FEATURE_KBD_LED_REPORT_ID1 ||
-			report->id == FEATURE_KBD_LED_REPORT_ID2 ||
-			report->id == FEATURE_KBD_REPORT_ID)
+	if (report->id == ASUS_REPORT_ID_LED_AURA1 ||
+			report->id == ASUS_REPORT_ID_LED_AURA2 ||
+			report->id == ASUS_REPORT_ID_FEATURE)
 		return -1;
 	if (drvdata->quirks & QUIRK_ROG_NKEY_KEYBOARD) {
 		/*
@@ -480,19 +482,19 @@ static int asus_kbd_init(struct hid_device *hdev, u8 report_id)
 		return ret;
 	}
 
-	u8 *readbuf __free(kfree) = kzalloc(FEATURE_KBD_REPORT_SIZE, GFP_KERNEL);
+	u8 *readbuf __free(kfree) = kzalloc(ROG_ALLY_REPORT_SIZE, GFP_KERNEL);
 	if (!readbuf)
 		return -ENOMEM;
 
 	ret = hid_hw_raw_request(hdev, report_id, readbuf,
-				 FEATURE_KBD_REPORT_SIZE, HID_FEATURE_REPORT,
+				 ROG_ALLY_REPORT_SIZE, HID_FEATURE_REPORT,
 				 HID_REQ_GET_REPORT);
 	if (ret < 0) {
 		hid_warn(hdev, "Asus handshake %02x failed to receive ack: %d\n",
 			 report_id, ret);
 	} else if (memcmp(readbuf, buf, sizeof(buf)) != 0) {
 		hid_warn(hdev, "Asus handshake %02x returned invalid response: %*ph\n",
-			 report_id, FEATURE_KBD_REPORT_SIZE, readbuf);
+			 report_id, ROG_ALLY_REPORT_SIZE, readbuf);
 	}
 
 	/*
@@ -516,12 +518,12 @@ static int asus_kbd_get_functions(struct hid_device *hdev,
 		return ret;
 	}
 
-	readbuf = kzalloc(FEATURE_KBD_REPORT_SIZE, GFP_KERNEL);
+	readbuf = kzalloc(ROG_ALLY_REPORT_SIZE, GFP_KERNEL);
 	if (!readbuf)
 		return -ENOMEM;
 
 	ret = hid_hw_raw_request(hdev, report_id, readbuf,
-				 FEATURE_KBD_REPORT_SIZE, HID_FEATURE_REPORT,
+				 ROG_ALLY_REPORT_SIZE, HID_FEATURE_REPORT,
 				 HID_REQ_GET_REPORT);
 	if (ret < 0) {
 		hid_err(hdev, "Asus failed to request functions: %d\n", ret);
@@ -538,10 +540,10 @@ static int asus_kbd_get_functions(struct hid_device *hdev,
 static int asus_kbd_disable_oobe(struct hid_device *hdev)
 {
 	const u8 init[][6] = {
-		{ FEATURE_KBD_REPORT_ID, 0x05, 0x20, 0x31, 0x00, 0x08 },
-		{ FEATURE_KBD_REPORT_ID, 0xBA, 0xC5, 0xC4 },
-		{ FEATURE_KBD_REPORT_ID, 0xD0, 0x8F, 0x01 },
-		{ FEATURE_KBD_REPORT_ID, 0xD0, 0x85, 0xFF }
+		{ ASUS_REPORT_ID_FEATURE, 0x05, 0x20, 0x31, 0x00, 0x08 },
+		{ ASUS_REPORT_ID_FEATURE, 0xBA, 0xC5, 0xC4 },
+		{ ASUS_REPORT_ID_FEATURE, 0xD0, 0x8F, 0x01 },
+		{ ASUS_REPORT_ID_FEATURE, 0xD0, 0x85, 0xFF }
 	};
 	int ret;
 
@@ -582,7 +584,7 @@ static void asus_kbd_backlight_set(struct asus_hid_listener *listener,
 static void asus_kbd_backlight_work(struct work_struct *work)
 {
 	struct asus_kbd_leds *led = container_of(work, struct asus_kbd_leds, work);
-	u8 buf[] = { FEATURE_KBD_REPORT_ID, 0xba, 0xc5, 0xc4, 0x00 };
+	u8 buf[] = { ASUS_REPORT_ID_FEATURE, 0xba, 0xc5, 0xc4, 0x00 };
 	int ret;
 	unsigned long flags;
 
@@ -630,7 +632,7 @@ static int mcu_parse_version_string(const u8 *response, size_t response_size)
 
 static int mcu_request_version(struct hid_device *hdev)
 {
-	u8 *response __free(kfree) = kzalloc(ASUS_FEATURE_REPORT_SIZE, GFP_KERNEL);
+	u8 *response __free(kfree) = kzalloc(ROG_ALLY_REPORT_SIZE, GFP_KERNEL);
 	const u8 request[] = { 0x5a, 0x05, 0x03, 0x31, 0x00, 0x20 };
 	int ret;
 
@@ -641,17 +643,17 @@ static int mcu_request_version(struct hid_device *hdev)
 	if (ret < 0)
 		return ret;
 
-	ret = hid_hw_raw_request(hdev, FEATURE_REPORT_ID, response,
-				ASUS_FEATURE_REPORT_SIZE, HID_FEATURE_REPORT,
+	ret = hid_hw_raw_request(hdev, ASUS_REPORT_ID_FEATURE, response,
+				ROG_ALLY_REPORT_SIZE, HID_FEATURE_REPORT,
 				HID_REQ_GET_REPORT);
 	if (ret < 0)
 		return ret;
 
-	ret = mcu_parse_version_string(response, ASUS_FEATURE_REPORT_SIZE);
+	ret = mcu_parse_version_string(response, ROG_ALLY_REPORT_SIZE);
 	if (ret < 0) {
 		pr_err("Failed to parse MCU version: %d\n", ret);
 		print_hex_dump(KERN_ERR, "MCU: ", DUMP_PREFIX_NONE,
-			      16, 1, response, ASUS_FEATURE_REPORT_SIZE, false);
+			      16, 1, response, ROG_ALLY_REPORT_SIZE, false);
 	}
 
 	return ret;
@@ -687,29 +689,19 @@ static void validate_mcu_fw_version(struct hid_device *hdev, int idProduct)
 }
 
 /* ASUS Aura Multicolor LED support */
-static int asus_aura_apply_effect(struct asus_aura_leds *aura)
+static int asus_aura_set_brightness(struct asus_aura_leds *aura, u8 brightness)
 {
-	u8 buf[FEATURE_KBD_REPORT_SIZE];
-	int ret;
+	u8 buf[] = { ASUS_REPORT_ID_LED_AURA1, 0xba, 0xc5, 0xc4, brightness };
+	return asus_set_report(aura->hdev, buf, sizeof(buf));
+}
 
-	if (!aura || aura->removed)
-		return -ENODEV;
+static int asus_aura_set_effect(struct asus_aura_leds *aura)
+{
+	u8 buf[ROG_ALLY_REPORT_SIZE];
 
-	/* Set global brightness first */
 	memset(buf, 0, sizeof(buf));
-	buf[0] = FEATURE_KBD_LED_REPORT_ID1;
-	buf[1] = 0xba;
-	buf[2] = 0xc5;
-	buf[3] = 0xc4;
-	buf[4] = aura->brightness;
-	ret = asus_set_report(aura->hdev, buf, 5);
-	if (ret < 0)
-		return ret;
-
-	/* Apply the effect (Mode/Color/Speed) - 0xb3 = Aura effect command */
-	memset(buf, 0, sizeof(buf));
-	buf[0] = FEATURE_KBD_REPORT_ID;
-	buf[1] = 0xb3;
+	buf[0] = ASUS_REPORT_ID_FEATURE;
+	buf[1] = ASUS_AURA_CMD_SET_EFFECT;
 	buf[2] = aura->zone;
 	buf[3] = aura->mode;
 	buf[4] = aura->red;
@@ -725,16 +717,36 @@ static int asus_aura_apply_effect(struct asus_aura_leds *aura)
 		buf[8] = 0x01; /* Forward direction */
 	}
 
-	ret = asus_set_report(aura->hdev, buf, FEATURE_KBD_REPORT_SIZE);
-	if (ret < 0)
-		return ret;
+	return asus_set_report(aura->hdev, buf, ROG_ALLY_REPORT_SIZE);
+}
 
-	/* Commit the change */
+static int asus_aura_commit(struct asus_aura_leds *aura)
+{
+	int ret;
+
 	ret = asus_set_report(aura->hdev, EC_MODE_LED_SET, sizeof(EC_MODE_LED_SET));
 	if (ret < 0)
 		return ret;
 
 	return asus_set_report(aura->hdev, EC_MODE_LED_APPLY, sizeof(EC_MODE_LED_APPLY));
+}
+
+static int asus_aura_apply_effect(struct asus_aura_leds *aura)
+{
+	int ret;
+
+	if (!aura || aura->removed)
+		return -ENODEV;
+
+	ret = asus_aura_set_brightness(aura, aura->brightness);
+	if (ret < 0)
+		return ret;
+
+	ret = asus_aura_set_effect(aura);
+	if (ret < 0)
+		return ret;
+
+	return asus_aura_commit(aura);
 }
 
 static void asus_aura_work(struct work_struct *work)
@@ -905,6 +917,23 @@ static int asus_haptic_play_effect(struct input_dev *dev, void *data,
 	return 0;
 }
 
+/**
+ * asus_haptic_update_vibe_luts - Update the vibration lookup tables.
+ * @haptic: The haptic device structure.
+ *
+ * This function calculates a "Rational Curve" for the haptic motors.
+ * The formula used is: y = floor + (intensity - floor) * (i * (100 + k)) / (127 * 100 + k * i)
+ *
+ * Why this curve?
+ * Most haptic motors have a non-linear response to linear PWM input. A simple linear
+ * scaling often results in "buzzy" or "weak" vibration at certain magnitudes.
+ * This rational curve allows us to define:
+ * 1. A 'floor' (minimum intensity required to feel the vibration).
+ * 2. A 'k' factor (curve shape) to tune the ramp-up speed.
+ *
+ * The result is a much more "premium" and natural haptic feel, especially on
+ * devices like the ROG Ally.
+ */
 static void asus_haptic_update_vibe_luts(struct asus_haptic *haptic)
 {
 	int i, side;
@@ -1043,7 +1072,7 @@ static int asus_haptic_register(struct hid_device *hdev)
 	if (!haptic->ff_packet)
 		return -ENOMEM;
 
-	haptic->ff_packet->report_id = FEATURE_REPORT_ID;
+	haptic->ff_packet->report_id = ASUS_REPORT_ID_HAPTIC;
 	haptic->ff_packet->ff.enable = 0x0f;
 	haptic->ff_packet->ff.pulse_sustain_10ms = 0xff;
 	haptic->ff_packet->ff.loop_count = 0xeb;
@@ -1084,12 +1113,12 @@ static int asus_kbd_register_leds(struct hid_device *hdev)
 	unsigned char kbd_func;
 	int ret;
 
-	ret = asus_kbd_init(hdev, FEATURE_KBD_REPORT_ID);
+	ret = asus_kbd_init(hdev, ASUS_REPORT_ID_FEATURE);
 	if (ret < 0)
 		return ret;
 
 	/* Get keyboard functions */
-	ret = asus_kbd_get_functions(hdev, &kbd_func, FEATURE_KBD_REPORT_ID);
+	ret = asus_kbd_get_functions(hdev, &kbd_func, ASUS_REPORT_ID_FEATURE);
 	if (ret < 0)
 		return ret;
 
@@ -1098,8 +1127,8 @@ static int asus_kbd_register_leds(struct hid_device *hdev)
 		return -ENODEV;
 
 	if (drvdata->quirks & QUIRK_ROG_NKEY_ID1ID2_INIT) {
-		asus_kbd_init(hdev, FEATURE_KBD_LED_REPORT_ID1);
-		asus_kbd_init(hdev, FEATURE_KBD_LED_REPORT_ID2);
+		asus_kbd_init(hdev, ASUS_REPORT_ID_LED_AURA1);
+		asus_kbd_init(hdev, ASUS_REPORT_ID_LED_AURA2);
 	}
 
 	if (dmi_match(DMI_PRODUCT_FAMILY, "ProArt P16")) {
@@ -1108,7 +1137,7 @@ static int asus_kbd_register_leds(struct hid_device *hdev)
 			return ret;
 	}
 
-	if (drvdata->quirks & QUIRK_ASUS_CONTROLLER) {
+	if (drvdata->quirks & QUIRK_ROG_ALLY_XPAD) {
 		intf = to_usb_interface(hdev->dev.parent);
 		udev = interface_to_usbdev(intf);
 		validate_mcu_fw_version(hdev,
@@ -1488,7 +1517,7 @@ static int asus_start_multitouch(struct hid_device *hdev)
 {
 	int ret;
 	static const unsigned char buf[] = {
-		FEATURE_REPORT_ID, 0x00, 0x03, 0x01, 0x00
+		ASUS_REPORT_ID_HAPTIC, 0x00, 0x03, 0x01, 0x00
 	};
 	unsigned char *dmabuf = kmemdup(buf, sizeof(buf), GFP_KERNEL);
 
@@ -1516,7 +1545,7 @@ static int __maybe_unused asus_resume(struct hid_device *hdev) {
 	int ret = 0;
 
 	if (drvdata->kbd_backlight) {
-		const u8 buf[] = { FEATURE_KBD_REPORT_ID, 0xba, 0xc5, 0xc4,
+		const u8 buf[] = { ASUS_REPORT_ID_FEATURE, 0xba, 0xc5, 0xc4,
 				drvdata->kbd_backlight->brightness };
 		ret = asus_set_report(hdev, buf, sizeof(buf));
 		if (ret < 0) {
@@ -1540,12 +1569,19 @@ asus_resume_err:
 static int __maybe_unused asus_reset_resume(struct hid_device *hdev)
 {
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	int ret;
 
-	if (drvdata->tp)
-		return asus_start_multitouch(hdev);
+	if (drvdata->tp) {
+		ret = asus_start_multitouch(hdev);
+		if (ret)
+			return ret;
+	}
 
-	if (drvdata->aura_leds || drvdata->haptic)
-		asus_aura_init(hdev);
+	if (drvdata->aura_leds || drvdata->haptic) {
+		ret = asus_aura_init(hdev);
+		if (ret < 0)
+			return ret;
+	}
 
 	return asus_resume(hdev);
 }
@@ -1688,20 +1724,20 @@ static int asus_probe(struct hid_device *hdev, const struct hid_device_id *id)
 			goto err_stop_hw;
 	}
 
-	if (drvdata->quirks & (QUIRK_ASUS_CONTROLLER | QUIRK_ROG_NKEY_KEYBOARD)) {
+	if (drvdata->quirks & (QUIRK_ROG_ALLY_XPAD | QUIRK_ROG_NKEY_KEYBOARD)) {
 		ret = asus_aura_init(hdev);
 		if (ret < 0)
 			hid_warn(hdev, "Asus Aura init failed: %d\n", ret);
 
-		if (drvdata->quirks & QUIRK_ASUS_CONTROLLER)
-			ret = asus_aura_register_leds(hdev, "go_s:rgb:joystick_rings");
+		if (drvdata->quirks & QUIRK_ROG_ALLY_XPAD)
+			ret = asus_aura_register_leds(hdev, "go_s:rgb:joystick_rings"); // TODO: go_s workaround is to expose SteamOS RGB customization menu; update once asus is recognized in upstream kernel
 		else
 			ret = asus_aura_register_leds(hdev, "asus::aura_kbd");
 
 		if (ret < 0)
 			hid_warn(hdev, "Asus Aura LED registration failed: %d\n", ret);
 
-		if (drvdata->quirks & QUIRK_ASUS_CONTROLLER) {
+		if (drvdata->quirks & QUIRK_ROG_ALLY_XPAD) {
 			ret = asus_haptic_register(hdev);
 			if (ret < 0)
 				hid_warn(hdev, "Asus Haptic registration failed: %d\n", ret);
@@ -1881,10 +1917,10 @@ static const struct hid_device_id asus_devices[] = {
 	#if !IS_REACHABLE(CONFIG_ASUS_ALLY_HID)
 	{ HID_USB_DEVICE(USB_VENDOR_ID_ASUSTEK,
 	    USB_DEVICE_ID_ASUSTEK_ROG_NKEY_ALLY),
-	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD | QUIRK_ASUS_CONTROLLER},
+	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD | QUIRK_ROG_ALLY_XPAD},
 	{ HID_USB_DEVICE(USB_VENDOR_ID_ASUSTEK,
 	    USB_DEVICE_ID_ASUSTEK_ROG_NKEY_ALLY_X),
-	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD | QUIRK_ASUS_CONTROLLER },
+	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD | QUIRK_ROG_ALLY_XPAD },
 	#endif /* !IS_REACHABLE(CONFIG_ASUS_ALLY_HID) */
 
 	{ HID_USB_DEVICE(USB_VENDOR_ID_ASUSTEK,

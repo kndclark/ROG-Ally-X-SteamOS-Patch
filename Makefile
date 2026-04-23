@@ -1,4 +1,4 @@
-obj-m += hid-asus-ally.o
+obj-m += hid-asus.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 

@@ -1,12 +1,13 @@
 #!/bin/bash
 
-# ROG Ally X LED Module Installer for SteamOS
-# This script automates building and installing the hid-asus-ally module.
+# ASUS Unified HID Driver Installer for SteamOS
+# This script automates building and installing the patched hid-asus module.
 
 set -e
 
 # --- Configuration ---
-MODULE_NAME="hid-asus-ally"
+MODULE_NAME="hid-asus"
+OLD_MODULE_NAME="hid-asus-ally"
 MODULE_FILE="${MODULE_NAME}.ko"
 MODULE_ZST="${MODULE_FILE}.zst"
 INSTALL_PATH="/lib/modules/$(uname -r)/kernel/drivers/hid/"
@@ -47,20 +48,6 @@ if [ "$EUID" -ne 0 ]; then
     error "Please run this script with sudo: sudo ./install.sh"
 fi
 
-# Check if user password is set (required for pacman/sudo)
-PW_STATUS=$(passwd --status "$TARGET_USER" | awk '{print $2}')
-if [ "$PW_STATUS" != "P" ]; then
-    log "--------------------------------------------------------"
-    warn "User '$TARGET_USER' does not appear to have a password set."
-    warn "SteamOS requires a user password for 'sudo' and 'pacman' operations."
-    warn "If you haven't set one, run 'passwd' in a new terminal first."
-    log "--------------------------------------------------------"
-    read -p "Continue anyway? (y/N) " confirm
-    if [[ ! $confirm =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-fi
-
 # --- 2. Unlock Filesystem ---
 
 if [ -f /usr/bin/steamos-readonly ]; then
@@ -68,25 +55,18 @@ if [ -f /usr/bin/steamos-readonly ]; then
     steamos-readonly disable
 fi
 
-# --- 3. Initialize Keys ---
+# --- 3. Remove Old Out-of-tree Driver ---
 
-KEYRING_DB="/etc/pacman.d/gnupg/pubring.kbx"
-# Check if keyring is missing, or if the DB file is empty/near-empty (32 bytes is typical for empty kbx)
-if [ ! -d /etc/pacman.d/gnupg ] || [ ! -f "$KEYRING_DB" ] || [ $(stat -c%s "$KEYRING_DB" 2>/dev/null || echo 0) -le 32 ]; then
-    log "Initializing/Populating pacman keys (this may take a minute)..."
-    # Clear any stale GPG locks that might cause "not writable" errors
-    rm -f /etc/pacman.d/gnupg/*.lock 2>/dev/null
-    pacman-key --init
-    pacman-key --populate archlinux holo
-fi
+log "Checking for old $OLD_MODULE_NAME driver..."
+# Search the entire module tree for any instances of the old driver to be safe
+find "/lib/modules/$(uname -r)/" -name "${OLD_MODULE_NAME}.ko*" -delete 2>/dev/null || true
 
-# --- 4. Install Dependencies ---
+log "Legacy driver removed (if any existed)."
+
+# --- 4. Initialize Keys & Install Dependencies ---
 
 log "Checking dependencies..."
-
-# Detect correct headers
 KERNEL_VER=$(uname -r)
-# Extract common SteamOS header patterns (e.g., neptune-618)
 HEADER_SUFFIX=$(echo "$KERNEL_VER" | grep -o 'neptune-[0-9]*' || echo "")
 if [ -n "$HEADER_SUFFIX" ]; then
     HEADER_PKG="linux-${HEADER_SUFFIX}-headers"
@@ -94,14 +74,20 @@ else
     HEADER_PKG="linux-headers"
 fi
 
-log "Detected required headers: $HEADER_PKG"
+# Initialize keys if needed
+KEYRING_DB="/etc/pacman.d/gnupg/pubring.kbx"
+if [ ! -d /etc/pacman.d/gnupg ] || [ ! -f "$KEYRING_DB" ] || [ $(stat -c%s "$KEYRING_DB" 2>/dev/null || echo 0) -le 32 ]; then
+    log "Initializing/Populating pacman keys..."
+    rm -f /etc/pacman.d/gnupg/*.lock 2>/dev/null
+    pacman-key --init
+    pacman-key --populate archlinux holo
+fi
 
-# Install base-devel and headers
 pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd
 
 # --- 5. Build and Install ---
 
-log "Building module..."
+log "Building unified module..."
 make clean
 make all
 
@@ -135,6 +121,12 @@ depmod -a
 # --- 6. Reload Module ---
 
 log "Reloading module..."
+# Force unload the old module if it's still in memory
+if lsmod | grep -q "${OLD_MODULE_NAME//-/_}"; then
+    log "Unloading old $OLD_MODULE_NAME..."
+    modprobe -r "${OLD_MODULE_NAME//-/_}" || true
+fi
+
 if lsmod | grep -q "${MODULE_NAME//-/_}"; then
     modprobe -r "${MODULE_NAME//-/_}"
 fi
@@ -150,7 +142,7 @@ fi
 # --- 7. Final Status ---
 
 log "Installation complete!"
-log "Checking dmesg for Ally X registration..."
-dmesg | grep -i "asus_rog_ally" | tail -n 5 || true
+log "Checking dmesg for registration..."
+dmesg | grep -i "asus" | tail -n 5 || true
 
-log "Note: SteamOS updates will reset the filesystem. Simply re-run this script after an update to restore the driver."
+log "Note: SteamOS updates will reset the filesystem. Simply re-run this script after an update."
