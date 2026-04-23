@@ -54,22 +54,21 @@ MODULE_DESCRIPTION("Asus HID Keyboard and TouchPad");
 #define FEATURE_KBD_LED_REPORT_ID1 0x5d
 #define FEATURE_KBD_LED_REPORT_ID2 0x5e
 
-#define ROG_ALLY_REPORT_SIZE 64
+#define ASUS_FEATURE_REPORT_SIZE 64
 #define ROG_ALLY_X_MIN_MCU 313
 #define ROG_ALLY_MIN_MCU 319
 
 #define SUPPORT_KBD_BACKLIGHT BIT(0)
 #define SUPPORT_AURA_MC BIT(1)
 
-#define FEATURE_ROG_ALLY_REPORT_ID 0x5a
 #define FEATURE_ROG_ALLY_CODE_PAGE 0xd1
 
-#define EC_MODE_LED_APPLY_LEN 17
-#define EC_MODE_LED_SET_LEN 17
-
 static const u8 EC_INIT_STRING[] = { 0x5a, 'A', 'S', 'U', 'S', ' ', 'T', 'e','c', 'h', '.', 'I', 'n', 'c', '.', '\0' };
+/* 0xb4 = Aura apply command (ROG Ally EC) */
 static const u8 EC_MODE_LED_APPLY[] = { 0x5a, 0xb4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+/* 0xb5 = Aura set command (ROG Ally EC) */
 static const u8 EC_MODE_LED_SET[] = { 0x5a, 0xb5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+/* 0x0d = Force Feedback report ID, 0x0f = all motors off */
 static const u8 FORCE_FEEDBACK_OFF[] = { 0x0d, 0x0f, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0xeb };
 
 #define MAX_TOUCH_MAJOR 8
@@ -102,7 +101,7 @@ static const u8 FORCE_FEEDBACK_OFF[] = { 0x0d, 0x0f, 0x00, 0x00, 0x00, 0x00, 0xf
 #define QUIRK_MEDION_E1239T		BIT(10)
 #define QUIRK_ROG_NKEY_KEYBOARD		BIT(11)
 #define QUIRK_ROG_CLAYMORE_II_KEYBOARD BIT(12)
-#define QUIRK_ROG_ALLY_XPAD		BIT(13)
+#define QUIRK_ASUS_CONTROLLER		BIT(13)
 #define QUIRK_ROG_NKEY_ID1ID2_INIT		BIT(14)
 
 #define I2C_KEYBOARD_QUIRKS			(QUIRK_FIX_NOTEBOOK_REPORT | \
@@ -162,6 +161,9 @@ struct asus_haptic {
 	spinlock_t lock;
 	bool removed;
 	bool update_pending;
+	u8 vibration_lut[2][128];
+	u8 vibration_min;
+	int vibration_curve;
 };
 
 struct asus_touchpad_info {
@@ -440,7 +442,7 @@ static int asus_raw_event(struct hid_device *hdev,
 	return 0;
 }
 
-static int asus_kbd_set_report(struct hid_device *hdev, const u8 *buf, size_t buf_size)
+static int asus_set_report(struct hid_device *hdev, const u8 *buf, size_t buf_size)
 {
 	unsigned char *dmabuf;
 	int ret;
@@ -471,7 +473,7 @@ static int asus_kbd_init(struct hid_device *hdev, u8 report_id)
 		     0x65, 0x63, 0x68, 0x2e, 0x49, 0x6e, 0x63, 0x2e, 0x00 };
 	int ret;
 
-	ret = asus_kbd_set_report(hdev, buf, sizeof(buf));
+	ret = asus_set_report(hdev, buf, sizeof(buf));
 	if (ret < 0) {
 		hid_err(hdev, "Asus handshake %02x failed to send: %d\n",
 			report_id, ret);
@@ -508,7 +510,7 @@ static int asus_kbd_get_functions(struct hid_device *hdev,
 	u8 *readbuf;
 	int ret;
 
-	ret = asus_kbd_set_report(hdev, buf, sizeof(buf));
+	ret = asus_set_report(hdev, buf, sizeof(buf));
 	if (ret < 0) {
 		hid_err(hdev, "Asus failed to send configuration command: %d\n", ret);
 		return ret;
@@ -544,7 +546,7 @@ static int asus_kbd_disable_oobe(struct hid_device *hdev)
 	int ret;
 
 	for (size_t i = 0; i < ARRAY_SIZE(init); i++) {
-		ret = asus_kbd_set_report(hdev, init[i], sizeof(init[i]));
+		ret = asus_set_report(hdev, init[i], sizeof(init[i]));
 		if (ret < 0)
 			return ret;
 	}
@@ -588,7 +590,7 @@ static void asus_kbd_backlight_work(struct work_struct *work)
 	buf[4] = led->brightness;
 	spin_unlock_irqrestore(&led->lock, flags);
 
-	ret = asus_kbd_set_report(led->hdev, buf, sizeof(buf));
+	ret = asus_set_report(led->hdev, buf, sizeof(buf));
 	if (ret < 0)
 		hid_err(led->hdev, "Asus failed to set keyboard backlight: %d\n", ret);
 }
@@ -628,28 +630,28 @@ static int mcu_parse_version_string(const u8 *response, size_t response_size)
 
 static int mcu_request_version(struct hid_device *hdev)
 {
-	u8 *response __free(kfree) = kzalloc(ROG_ALLY_REPORT_SIZE, GFP_KERNEL);
+	u8 *response __free(kfree) = kzalloc(ASUS_FEATURE_REPORT_SIZE, GFP_KERNEL);
 	const u8 request[] = { 0x5a, 0x05, 0x03, 0x31, 0x00, 0x20 };
 	int ret;
 
 	if (!response)
 		return -ENOMEM;
 
-	ret = asus_kbd_set_report(hdev, request, sizeof(request));
+	ret = asus_set_report(hdev, request, sizeof(request));
 	if (ret < 0)
 		return ret;
 
 	ret = hid_hw_raw_request(hdev, FEATURE_REPORT_ID, response,
-				ROG_ALLY_REPORT_SIZE, HID_FEATURE_REPORT,
+				ASUS_FEATURE_REPORT_SIZE, HID_FEATURE_REPORT,
 				HID_REQ_GET_REPORT);
 	if (ret < 0)
 		return ret;
 
-	ret = mcu_parse_version_string(response, ROG_ALLY_REPORT_SIZE);
+	ret = mcu_parse_version_string(response, ASUS_FEATURE_REPORT_SIZE);
 	if (ret < 0) {
 		pr_err("Failed to parse MCU version: %d\n", ret);
 		print_hex_dump(KERN_ERR, "MCU: ", DUMP_PREFIX_NONE,
-			      16, 1, response, ROG_ALLY_REPORT_SIZE, false);
+			      16, 1, response, ASUS_FEATURE_REPORT_SIZE, false);
 	}
 
 	return ret;
@@ -700,13 +702,13 @@ static int asus_aura_apply_effect(struct asus_aura_leds *aura)
 	buf[2] = 0xc5;
 	buf[3] = 0xc4;
 	buf[4] = aura->brightness;
-	ret = asus_kbd_set_report(aura->hdev, buf, 5);
+	ret = asus_set_report(aura->hdev, buf, 5);
 	if (ret < 0)
 		return ret;
 
-	/* Apply the effect (Mode/Color/Speed) */
+	/* Apply the effect (Mode/Color/Speed) - 0xb3 = Aura effect command */
 	memset(buf, 0, sizeof(buf));
-	buf[0] = FEATURE_ROG_ALLY_REPORT_ID;
+	buf[0] = FEATURE_KBD_REPORT_ID;
 	buf[1] = 0xb3;
 	buf[2] = aura->zone;
 	buf[3] = aura->mode;
@@ -723,16 +725,16 @@ static int asus_aura_apply_effect(struct asus_aura_leds *aura)
 		buf[8] = 0x01; /* Forward direction */
 	}
 
-	ret = asus_kbd_set_report(aura->hdev, buf, FEATURE_KBD_REPORT_SIZE);
+	ret = asus_set_report(aura->hdev, buf, FEATURE_KBD_REPORT_SIZE);
 	if (ret < 0)
 		return ret;
 
 	/* Commit the change */
-	ret = asus_kbd_set_report(aura->hdev, EC_MODE_LED_SET, EC_MODE_LED_SET_LEN);
+	ret = asus_set_report(aura->hdev, EC_MODE_LED_SET, sizeof(EC_MODE_LED_SET));
 	if (ret < 0)
 		return ret;
 
-	return asus_kbd_set_report(aura->hdev, EC_MODE_LED_APPLY, EC_MODE_LED_APPLY_LEN);
+	return asus_set_report(aura->hdev, EC_MODE_LED_APPLY, sizeof(EC_MODE_LED_APPLY));
 }
 
 static void asus_aura_work(struct work_struct *work)
@@ -786,12 +788,20 @@ static ssize_t aura_mode_store(struct device *dev, struct device_attribute *attr
 			       const char *buf, size_t count)
 {
 	struct asus_drvdata *drvdata = dev_get_drvdata(dev);
+	struct asus_aura_leds *aura = drvdata->aura_leds;
 	int mode = sysfs_match_string(asus_aura_modes, buf);
+	unsigned long flags;
+
 	if (mode < 0)
 		return mode;
 
-	drvdata->aura_leds->mode = mode;
-	schedule_work(&drvdata->aura_leds->work);
+	spin_lock_irqsave(&aura->lock, flags);
+	aura->mode = mode;
+	aura->update_pending = true;
+	if (!aura->removed)
+		schedule_work(&aura->work);
+	spin_unlock_irqrestore(&aura->lock, flags);
+
 	return count;
 }
 static DEVICE_ATTR_RW(aura_mode);
@@ -806,13 +816,21 @@ static ssize_t aura_speed_store(struct device *dev, struct device_attribute *att
 				const char *buf, size_t count)
 {
 	struct asus_drvdata *drvdata = dev_get_drvdata(dev);
+	struct asus_aura_leds *aura = drvdata->aura_leds;
+	unsigned long flags;
 	u8 speed;
 	int ret = kstrtou8(buf, 0, &speed);
+
 	if (ret)
 		return ret;
 
-	drvdata->aura_leds->speed = speed;
-	schedule_work(&drvdata->aura_leds->work);
+	spin_lock_irqsave(&aura->lock, flags);
+	aura->speed = speed;
+	aura->update_pending = true;
+	if (!aura->removed)
+		schedule_work(&aura->work);
+	spin_unlock_irqrestore(&aura->lock, flags);
+
 	return count;
 }
 static DEVICE_ATTR_RW(aura_speed);
@@ -824,7 +842,7 @@ static struct attribute *asus_aura_attrs[] = {
 };
 ATTRIBUTE_GROUPS(asus_aura);
 
-static int asus_aura_register_leds(struct hid_device *hdev)
+static int asus_aura_register_leds(struct hid_device *hdev, const char *name)
 {
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
 	struct asus_aura_leds *aura;
@@ -852,7 +870,7 @@ static int asus_aura_register_leds(struct hid_device *hdev)
 
 	aura->led_mc.subled_info = subleds;
 	aura->led_mc.num_colors = 3;
-	aura->led_mc.led_cdev.name = "go_s:rgb:joystick_rings";
+	aura->led_mc.led_cdev.name = name;
 	aura->led_mc.led_cdev.max_brightness = 255;
 	aura->led_mc.led_cdev.brightness_set = asus_aura_set;
 	aura->led_mc.led_cdev.groups = asus_aura_groups;
@@ -877,8 +895,8 @@ static int asus_haptic_play_effect(struct input_dev *dev, void *data,
 		return 0;
 
 	spin_lock_irqsave(&haptic->lock, flags);
-	haptic->ff_packet->ff.magnitude_strong = effect->u.rumble.strong_magnitude / 512;
-	haptic->ff_packet->ff.magnitude_weak = effect->u.rumble.weak_magnitude / 512;
+	haptic->ff_packet->ff.magnitude_strong = haptic->vibration_lut[0][effect->u.rumble.strong_magnitude >> 9];
+	haptic->ff_packet->ff.magnitude_weak = haptic->vibration_lut[1][effect->u.rumble.weak_magnitude >> 9];
 	haptic->update_pending = true;
 	if (!haptic->removed)
 		schedule_work(&haptic->work);
@@ -887,30 +905,123 @@ static int asus_haptic_play_effect(struct input_dev *dev, void *data,
 	return 0;
 }
 
+static void asus_haptic_update_vibe_luts(struct asus_haptic *haptic)
+{
+	int i, side;
+	u32 intensity = 0x7f; /* 100% hardware gain */
+	u32 floor, numer, denom, val;
+	int k;
+
+	for (side = 0; side < 2; side++) {
+		floor = (haptic->vibration_min * 127) / 100;
+		k = haptic->vibration_curve;
+
+		for (i = 0; i < 128; i++) {
+			if (i == 0) {
+				haptic->vibration_lut[side][i] = 0;
+				continue;
+			}
+			if (intensity <= floor) {
+				haptic->vibration_lut[side][i] = intensity;
+				continue;
+			}
+
+			/*
+			 * Rational Curve: y = floor + (intensity - floor) * (i * (100 + k)) / (127 * 100 + k * i)
+			 */
+			numer = i * (100 + k);
+			denom = (127 * 100) + (k * i);
+			if (denom == 0)
+				val = floor + (intensity - floor);
+			else
+				val = floor + (u32)div_u64((u64)(intensity - floor) * numer, denom);
+			haptic->vibration_lut[side][i] = (u8)clamp_val(val, 0, 127);
+		}
+	}
+}
+
+static ssize_t vibration_floor_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct asus_drvdata *drvdata = dev_get_drvdata(dev);
+	return sysfs_emit(buf, "%d\n", drvdata->haptic->vibration_min);
+}
+
+static ssize_t vibration_floor_store(struct device *dev, struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	struct asus_drvdata *drvdata = dev_get_drvdata(dev);
+	struct asus_haptic *haptic = drvdata->haptic;
+	int ret, val;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < 0 || val > 100)
+		return -EINVAL;
+
+	haptic->vibration_min = val;
+	asus_haptic_update_vibe_luts(haptic);
+
+	return count;
+}
+static DEVICE_ATTR_RW(vibration_floor);
+
+static ssize_t vibration_curve_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct asus_drvdata *drvdata = dev_get_drvdata(dev);
+	return sysfs_emit(buf, "%d\n", drvdata->haptic->vibration_curve);
+}
+
+static ssize_t vibration_curve_store(struct device *dev, struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	struct asus_drvdata *drvdata = dev_get_drvdata(dev);
+	struct asus_haptic *haptic = drvdata->haptic;
+	int ret, val;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < -100 || val > 500)
+		return -EINVAL;
+
+	haptic->vibration_curve = val;
+	asus_haptic_update_vibe_luts(haptic);
+
+	return count;
+}
+static DEVICE_ATTR_RW(vibration_curve);
+
+static struct attribute *asus_haptic_attrs[] = {
+	&dev_attr_vibration_floor.attr,
+	&dev_attr_vibration_curve.attr,
+	NULL
+};
+ATTRIBUTE_GROUPS(asus_haptic);
+
 static void asus_haptic_worker(struct work_struct *work)
 {
 	struct asus_haptic *haptic = container_of(work, struct asus_haptic, work);
-	struct asus_haptic_ff_report *ff_report;
+	struct asus_haptic_ff_report ff_report;
 	unsigned long flags;
 	bool update;
 
 	spin_lock_irqsave(&haptic->lock, flags);
 	update = haptic->update_pending;
 	haptic->update_pending = false;
+	if (update)
+		memcpy(&ff_report, haptic->ff_packet, sizeof(ff_report));
 	spin_unlock_irqrestore(&haptic->lock, flags);
 
 	if (!update)
 		return;
 
-	ff_report = kmemdup(haptic->ff_packet, sizeof(*haptic->ff_packet), GFP_KERNEL);
-	if (!ff_report)
-		return;
+	ff_report.ff.magnitude_left = ff_report.ff.magnitude_strong;
+	ff_report.ff.magnitude_right = ff_report.ff.magnitude_weak;
 
-	ff_report->ff.magnitude_left = ff_report->ff.magnitude_strong;
-	ff_report->ff.magnitude_right = ff_report->ff.magnitude_weak;
-
-	asus_kbd_set_report(haptic->hdev, (u8 *)ff_report, sizeof(*ff_report));
-	kfree(ff_report);
+	asus_set_report(haptic->hdev, (u8 *)&ff_report, sizeof(ff_report));
 }
 
 static int asus_haptic_register(struct hid_device *hdev)
@@ -937,8 +1048,16 @@ static int asus_haptic_register(struct hid_device *hdev)
 	haptic->ff_packet->ff.pulse_sustain_10ms = 0xff;
 	haptic->ff_packet->ff.loop_count = 0xeb;
 
+	haptic->vibration_min = 0;
+	haptic->vibration_curve = 0;
+	asus_haptic_update_vibe_luts(haptic);
+
 	input_set_capability(haptic->input, EV_FF, FF_RUMBLE);
 	ret = input_ff_create_memless(haptic->input, NULL, asus_haptic_play_effect);
+	if (ret)
+		return ret;
+
+	ret = sysfs_create_groups(&hdev->dev.kobj, asus_haptic_groups);
 	if (ret)
 		return ret;
 
@@ -950,11 +1069,11 @@ static int asus_aura_init(struct hid_device *hdev)
 {
 	int ret;
 
-	ret = asus_kbd_set_report(hdev, EC_INIT_STRING, sizeof(EC_INIT_STRING));
+	ret = asus_set_report(hdev, EC_INIT_STRING, sizeof(EC_INIT_STRING));
 	if (ret < 0)
 		return ret;
 
-	return asus_kbd_set_report(hdev, FORCE_FEEDBACK_OFF, sizeof(FORCE_FEEDBACK_OFF));
+	return asus_set_report(hdev, FORCE_FEEDBACK_OFF, sizeof(FORCE_FEEDBACK_OFF));
 }
 
 static int asus_kbd_register_leds(struct hid_device *hdev)
@@ -989,7 +1108,7 @@ static int asus_kbd_register_leds(struct hid_device *hdev)
 			return ret;
 	}
 
-	if (drvdata->quirks & QUIRK_ROG_ALLY_XPAD) {
+	if (drvdata->quirks & QUIRK_ASUS_CONTROLLER) {
 		intf = to_usb_interface(hdev->dev.parent);
 		udev = interface_to_usbdev(intf);
 		validate_mcu_fw_version(hdev,
@@ -1399,7 +1518,7 @@ static int __maybe_unused asus_resume(struct hid_device *hdev) {
 	if (drvdata->kbd_backlight) {
 		const u8 buf[] = { FEATURE_KBD_REPORT_ID, 0xba, 0xc5, 0xc4,
 				drvdata->kbd_backlight->brightness };
-		ret = asus_kbd_set_report(hdev, buf, sizeof(buf));
+		ret = asus_set_report(hdev, buf, sizeof(buf));
 		if (ret < 0) {
 			hid_err(hdev, "Asus failed to set keyboard backlight: %d\n", ret);
 			goto asus_resume_err;
@@ -1569,16 +1688,20 @@ static int asus_probe(struct hid_device *hdev, const struct hid_device_id *id)
 			goto err_stop_hw;
 	}
 
-	if (drvdata->quirks & (QUIRK_ROG_ALLY_XPAD | QUIRK_ROG_NKEY_KEYBOARD)) {
+	if (drvdata->quirks & (QUIRK_ASUS_CONTROLLER | QUIRK_ROG_NKEY_KEYBOARD)) {
 		ret = asus_aura_init(hdev);
 		if (ret < 0)
 			hid_warn(hdev, "Asus Aura init failed: %d\n", ret);
 
-		ret = asus_aura_register_leds(hdev);
+		if (drvdata->quirks & QUIRK_ASUS_CONTROLLER)
+			ret = asus_aura_register_leds(hdev, "go_s:rgb:joystick_rings");
+		else
+			ret = asus_aura_register_leds(hdev, "asus::aura_kbd");
+
 		if (ret < 0)
 			hid_warn(hdev, "Asus Aura LED registration failed: %d\n", ret);
 
-		if (drvdata->quirks & QUIRK_ROG_ALLY_XPAD) {
+		if (drvdata->quirks & QUIRK_ASUS_CONTROLLER) {
 			ret = asus_haptic_register(hdev);
 			if (ret < 0)
 				hid_warn(hdev, "Asus Haptic registration failed: %d\n", ret);
@@ -1758,10 +1881,10 @@ static const struct hid_device_id asus_devices[] = {
 	#if !IS_REACHABLE(CONFIG_ASUS_ALLY_HID)
 	{ HID_USB_DEVICE(USB_VENDOR_ID_ASUSTEK,
 	    USB_DEVICE_ID_ASUSTEK_ROG_NKEY_ALLY),
-	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD | QUIRK_ROG_ALLY_XPAD},
+	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD | QUIRK_ASUS_CONTROLLER},
 	{ HID_USB_DEVICE(USB_VENDOR_ID_ASUSTEK,
 	    USB_DEVICE_ID_ASUSTEK_ROG_NKEY_ALLY_X),
-	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD | QUIRK_ROG_ALLY_XPAD },
+	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD | QUIRK_ASUS_CONTROLLER },
 	#endif /* !IS_REACHABLE(CONFIG_ASUS_ALLY_HID) */
 
 	{ HID_USB_DEVICE(USB_VENDOR_ID_ASUSTEK,
