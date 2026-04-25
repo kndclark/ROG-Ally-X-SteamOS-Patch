@@ -1,5 +1,5 @@
 obj-m += hid-asus.o
-ccflags-y += -I$(src)/include
+ccflags-y += -include $(PWD)/include/linux/platform_data/x86/asus-wmi.h
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
