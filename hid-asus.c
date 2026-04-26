@@ -493,7 +493,7 @@ static bool handle_ally_event(struct hid_device *hdev, u8 *data, int size)
 		}
 
 		keyboard_input = ally_drvdata.keyboard_input;
-		if (keyboard_input) {
+		if (keyboard_input && keycode > 0) {
 			input_report_key(keyboard_input, keycode, 1);
 			input_sync(keyboard_input);
 			input_report_key(keyboard_input, keycode, 0);
@@ -2635,7 +2635,7 @@ static int asus_raw_event(struct hid_device *hdev,
 
 	if ((drvdata->quirks & QUIRK_ROG_ALLY_XPAD) &&
 	    hid_asus_ally_raw_event(hdev, drvdata->rog_ally, report, data, size))
-		return 0;
+		return -1;
 
 	/*
 	 * Skip these report ID, the device emits a continuous stream associated
