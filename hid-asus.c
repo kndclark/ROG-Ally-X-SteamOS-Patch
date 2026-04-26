@@ -1867,11 +1867,15 @@ static void ally_rgb_do_work(struct work_struct *work)
 	led->update_rgb = false;
 	spin_unlock_irqrestore(&led->lock, flags);
 
-	/* Set global hardware brightness first (required for Rainbow/Chroma) */
-	ally_rgb_apply_brightness(led);
-
 	/* Apply the Aura effect (Mode/Speed/Color) */
 	ally_rgb_apply_effect(led);
+
+	/* Set global hardware brightness (required for Rainbow/Chroma) */
+	ally_rgb_apply_brightness(led);
+
+	hid_info(led->hdev, "Ally RGB: applied mode %d, brightness %d\n",
+		 ally_drvdata.led_rgb_data.mode,
+		 led->led_rgb_dev.led_cdev.brightness);
 }
 
 static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightness)
@@ -2022,6 +2026,9 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 	mc_led_info = led_rgb->led_rgb_dev.subled_info;
 
 	if (ally_drvdata.led_rgb_data.initialized) {
+		hid_info(led_rgb->hdev, "Ally RGB: resuming with cached brightness %d (last %d)\n",
+			 ally_drvdata.led_rgb_data.brightness,
+			 ally_drvdata.led_rgb_data.last_brightness);
 		ally_rgb_restore_settings(led_rgb, led_cdev, mc_led_info);
 		led_rgb->update_rgb = true;
 		ally_rgb_schedule_work(led_rgb);
