@@ -1887,9 +1887,10 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 		led->red[i]   = mc_cdev->subled_info[0].brightness;
 		led->green[i] = mc_cdev->subled_info[1].brightness;
 		led->blue[i]  = mc_cdev->subled_info[2].brightness;
-		ally_drvdata.led_rgb_data.red[i] = led->red[i];
-		ally_drvdata.led_rgb_data.green[i] = led->green[i];
-		ally_drvdata.led_rgb_data.blue[i] = led->blue[i];
+		/* Cache the unscaled intensity to survive brightness=0 (sleep) events */
+		ally_drvdata.led_rgb_data.red[i] = mc_cdev->subled_info[0].intensity;
+		ally_drvdata.led_rgb_data.green[i] = mc_cdev->subled_info[1].intensity;
+		ally_drvdata.led_rgb_data.blue[i] = mc_cdev->subled_info[2].intensity;
 	}
 	spin_unlock_irqrestore(&led->lock, flags);
 	ally_drvdata.led_rgb_data.brightness = brightness;
@@ -1985,22 +1986,20 @@ static void ally_rgb_restore_settings(struct ally_rgb_dev *led_rgb,
 				      struct led_classdev *led_cdev,
 				      struct mc_subled *mc_led_info)
 {
-	int arr_size = sizeof(ally_drvdata.led_rgb_data.red);
-
-	memcpy(led_rgb->red, ally_drvdata.led_rgb_data.red, arr_size);
-	memcpy(led_rgb->green, ally_drvdata.led_rgb_data.green, arr_size);
-	memcpy(led_rgb->blue, ally_drvdata.led_rgb_data.blue, arr_size);
-	/* Restore R/G/B intensity from the first LED zone (all zones are identical) */
-	for (int i = 0; i < 4; i++) {
-		led_rgb->red[i] = ally_drvdata.led_rgb_data.red[0];
-		led_rgb->green[i] = ally_drvdata.led_rgb_data.green[0];
-		led_rgb->blue[i] = ally_drvdata.led_rgb_data.blue[0];
-	}
-
+	/* Restore unscaled intensities from cache */
 	mc_led_info[0].intensity = ally_drvdata.led_rgb_data.red[0];
 	mc_led_info[1].intensity = ally_drvdata.led_rgb_data.green[0];
 	mc_led_info[2].intensity = ally_drvdata.led_rgb_data.blue[0];
 	led_cdev->brightness = ally_drvdata.led_rgb_data.brightness;
+
+	/* Recalculate scaled hardware colors */
+	led_mc_calc_color_components(&led_rgb->led_rgb_dev, led_cdev->brightness);
+
+	for (int i = 0; i < 4; i++) {
+		led_rgb->red[i] = mc_led_info[0].brightness;
+		led_rgb->green[i] = mc_led_info[1].brightness;
+		led_rgb->blue[i] = mc_led_info[2].brightness;
+	}
 }
 
 static void ally_rgb_resume_work_fn(struct work_struct *work)
