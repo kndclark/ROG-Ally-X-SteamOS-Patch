@@ -193,6 +193,7 @@ struct ally_rgb_dev {
 	struct hid_device *hdev;
 	struct led_classdev_mc led_rgb_dev;
 	struct work_struct work;
+	struct delayed_work resume_work;
 	bool output_worker_initialized;
 	spinlock_t lock;
 	bool removed;
@@ -1998,25 +1999,36 @@ static void ally_rgb_restore_settings(struct ally_rgb_dev *led_rgb,
 	led_cdev->brightness = ally_drvdata.led_rgb_data.brightness;
 }
 
-/* Resume LEDs after suspend — called from hid_asus_ally_reset_resume */
-static void ally_rgb_resume(void)
+static void ally_rgb_resume_work_fn(struct work_struct *work)
 {
-	struct ally_rgb_dev *led_rgb = ally_drvdata.led_rgb_dev;
+	struct ally_rgb_dev *led_rgb = container_of(work, struct ally_rgb_dev, resume_work.work);
 	struct led_classdev *led_cdev;
 	struct mc_subled *mc_led_info;
 
-	if (!led_rgb)
+	if (!led_rgb || led_rgb->removed)
 		return;
 
 	led_cdev = &led_rgb->led_rgb_dev.led_cdev;
 	mc_led_info = led_rgb->led_rgb_dev.subled_info;
 
 	if (ally_drvdata.led_rgb_data.initialized) {
-		/* MCU requires time to initialize before accepting LED packets */
-		msleep(1500);
 		ally_rgb_restore_settings(led_rgb, led_cdev, mc_led_info);
 		led_rgb->update_rgb = true;
 		ally_rgb_schedule_work(led_rgb);
+	}
+}
+
+/* Resume LEDs after suspend — called from hid_asus_ally_reset_resume */
+static void ally_rgb_resume(void)
+{
+	struct ally_rgb_dev *led_rgb = ally_drvdata.led_rgb_dev;
+
+	if (!led_rgb)
+		return;
+
+	if (ally_drvdata.led_rgb_data.initialized) {
+		/* Defer execution so USB reset_resume finishes and MCU is ready */
+		schedule_delayed_work(&led_rgb->resume_work, msecs_to_jiffies(1500));
 	}
 }
 
@@ -2245,6 +2257,7 @@ static struct ally_rgb_dev *ally_rgb_create(struct hid_device *hdev)
 	led_rgb->removed = false;
 
 	INIT_WORK(&led_rgb->work, ally_rgb_do_work);
+	INIT_DELAYED_WORK(&led_rgb->resume_work, ally_rgb_resume_work_fn);
 	led_rgb->output_worker_initialized = true;
 	spin_lock_init(&led_rgb->lock);
 
@@ -2256,9 +2269,7 @@ static struct ally_rgb_dev *ally_rgb_create(struct hid_device *hdev)
 
 	/* Re-apply saved state after MCU re-init (suspend/resume) */
 	if (ally_drvdata.led_rgb_data.initialized) {
-		msleep(1500);
-		led_rgb->update_rgb = true;
-		ally_rgb_schedule_work(led_rgb);
+		schedule_delayed_work(&led_rgb->resume_work, msecs_to_jiffies(1500));
 	}
 
 	return led_rgb;
@@ -2282,6 +2293,7 @@ static void ally_rgb_remove(struct hid_device *hdev)
 	led_rgb->output_worker_initialized = false;
 	spin_unlock_irqrestore(&led_rgb->lock, flags);
 	cancel_work_sync(&led_rgb->work);
+	cancel_delayed_work_sync(&led_rgb->resume_work);
 	devm_led_classdev_multicolor_unregister(&hdev->dev, &led_rgb->led_rgb_dev);
 
 	hid_info(hdev, "Removed Ally RGB LED interface\n");
