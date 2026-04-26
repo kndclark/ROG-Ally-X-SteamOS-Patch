@@ -195,6 +195,7 @@ struct ally_rgb_dev {
 	struct work_struct work;
 	struct delayed_work resume_work;
 	bool output_worker_initialized;
+	bool ready;
 	spinlock_t lock;
 	bool removed;
 	bool update_rgb;
@@ -1819,7 +1820,7 @@ static void ally_rgb_schedule_work(struct ally_rgb_dev *led)
 	unsigned long flags;
 
 	spin_lock_irqsave(&led->lock, flags);
-	if (!led->removed)
+	if (!led->removed && led->ready)
 		schedule_work(&led->work);
 	spin_unlock_irqrestore(&led->lock, flags);
 }
@@ -2030,6 +2031,7 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 			 ally_drvdata.led_rgb_data.brightness,
 			 ally_drvdata.led_rgb_data.last_brightness);
 		ally_rgb_restore_settings(led_rgb, led_cdev, mc_led_info);
+		led_rgb->ready = true;
 		led_rgb->update_rgb = true;
 		ally_rgb_schedule_work(led_rgb);
 	}
@@ -2286,7 +2288,10 @@ static struct ally_rgb_dev *ally_rgb_create(struct hid_device *hdev)
 
 	/* Re-apply saved state after MCU re-init (suspend/resume) */
 	if (ally_drvdata.led_rgb_data.initialized) {
+		led_rgb->ready = false;
 		schedule_delayed_work(&led_rgb->resume_work, msecs_to_jiffies(1500));
+	} else {
+		led_rgb->ready = true;
 	}
 
 	return led_rgb;
