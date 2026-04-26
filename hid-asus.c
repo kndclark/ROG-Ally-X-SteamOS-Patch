@@ -1504,7 +1504,7 @@ static struct ally_config *ally_config_create(struct hid_device *hdev, struct al
 
 	for (sysfs_i = 0; sysfs_i < ARRAY_SIZE(ally_attr_groups); sysfs_i++) {
 		ret = sysfs_create_group(&hdev->dev.kobj, &ally_attr_groups[sysfs_i]);
-		if (ret < 0 && ret != -EEXIST) {
+		if (ret < 0 && ret != -EEXIST) { /* -EEXIST ignore is a SteamOS-only guard (sysfs collisions don't occur on vanilla kernel)*/
 			hid_err(hdev, "Failed to create sysfs group '%s': %d\n",
 				ally_attr_groups[sysfs_i].name, ret);
 			goto ally_config_create_sysfs_err;
@@ -2028,7 +2028,7 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 		ally_rgb_schedule_work(led_rgb);
 	}
 
-	/* Force release all vendor buttons to prevent "stuck" ghosting on resume */
+	/* Force release all vendor buttons to prevent "stuck" ghosting on resume (workaround for Ally X USB re-probing during suspend/resume)*/
 	if (ally_drvdata.keyboard_input) {
 		input_report_key(ally_drvdata.keyboard_input, KEY_F16, 0);
 		input_report_key(ally_drvdata.keyboard_input, KEY_F17, 0);
