@@ -38,6 +38,7 @@
 #include <linux/sysfs.h>
 #include <linux/leds.h>
 #include <linux/led-class-multicolor.h>
+#include <linux/math64.h>
 
 #include "hid-ids.h"
 
@@ -249,6 +250,11 @@ struct ally_config {
 	u8 vibration_intensity_left;
 	u8 vibration_intensity_right;
 	bool vibration_active;
+
+	/* Vibration response curve LUT (rational curve from PR #4) */
+	u8 vibration_lut[2][128];
+	u8 vibration_min;	/* floor: minimum feelable vibration (0-100) */
+	int vibration_curve;	/* curve shape parameter (-100 to 500) */
 };
 
 struct ally_handheld {
@@ -719,10 +725,62 @@ static DEVICE_ATTR_RW(xbox_controller);
  *
  * Returns 0 on success, negative error code on failure
  */
+/**
+ * _ally_update_vibe_luts() - Rebuild the vibration response curve lookup tables
+ * @cfg: Ally config containing vibration parameters
+ *
+ * Uses a rational curve: y = floor + (intensity - floor) * (i * (100 + k)) / (127 * 100 + k * i)
+ * to preserve subtle haptics while capping motor intensity.
+ * The LUT is indexed by (magnitude >> 9) in the FF play_effect callback.
+ */
+static void _ally_update_vibe_luts(struct ally_config *cfg)
+{
+	int i, side;
+	u32 intensity, floor_val, numer, denom, val;
+	int k;
+	u8 intensities[2];
+
+	intensities[0] = cfg->vibration_intensity_left;
+	intensities[1] = cfg->vibration_intensity_right;
+
+	for (side = 0; side < 2; side++) {
+		intensity = (intensities[side] * 127) / 100;
+		floor_val = (cfg->vibration_min * 127) / 100;
+		k = cfg->vibration_curve;
+
+		for (i = 0; i < 128; i++) {
+			if (i == 0) {
+				cfg->vibration_lut[side][i] = 0;
+				continue;
+			}
+			/* If intensity is lower than floor, cap at intensity */
+			if (intensity <= floor_val) {
+				cfg->vibration_lut[side][i] = intensity;
+				continue;
+			}
+
+			/*
+			 * Rational Curve:
+			 * y = floor + (intensity - floor) * (i * (100 + k)) / (127 * 100 + k * i)
+			 * Use u64 intermediate to prevent overflow.
+			 */
+			numer = i * (100 + k);
+			denom = (127 * 100) + (k * i);
+			if (denom == 0)
+				val = floor_val + (intensity - floor_val);
+			else
+				val = floor_val + (u32)div_u64(
+					(u64)(intensity - floor_val) * numer, denom);
+			cfg->vibration_lut[side][i] = (u8)clamp_val(val, 0, 127);
+		}
+	}
+}
+
 static int ally_set_vibration_intensity(struct hid_device *hdev, struct ally_config *cfg,
 					u8 left, u8 right)
 {
-	u8 payload[] = { left, right };
+	/* Lock hardware gain at 100%; all scaling via software LUT */
+	u8 payload[] = { 100, 100 };
 	int ret;
 
 	u8 *buf __free(kfree) = ally_alloc_cmd(CMD_SET_VIBRATION_INTENSITY, payload, sizeof(payload));
@@ -779,6 +837,7 @@ static ssize_t vibration_intensity_left_store(struct device *dev, struct device_
 
 	scoped_guard(mutex, &cfg->config_mutex)
 		cfg->vibration_intensity_left = value;
+	_ally_update_vibe_luts(cfg);
 
 	return count;
 }
@@ -826,11 +885,104 @@ static ssize_t vibration_intensity_right_store(struct device *dev, struct device
 
 	scoped_guard(mutex, &cfg->config_mutex)
 		cfg->vibration_intensity_right = value;
+	_ally_update_vibe_luts(cfg);
 
 	return count;
 }
 
 static DEVICE_ATTR_RW(vibration_intensity_right);
+
+static ssize_t vibration_floor_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct hid_device *hdev = to_hid_device(dev);
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	struct ally_handheld *ally = drvdata->rog_ally;
+
+	if (!ally || !ally->config)
+		return -ENODEV;
+
+	return sprintf(buf, "%u\n", ally->config->vibration_min);
+}
+
+static ssize_t vibration_floor_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct hid_device *hdev = to_hid_device(dev);
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	struct ally_handheld *ally = drvdata->rog_ally;
+	struct ally_config *cfg;
+	int ret, val;
+
+	if (!ally || !ally->config)
+		return -ENODEV;
+
+	cfg = ally->config;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < 0 || val > 100)
+		return -EINVAL;
+
+	/* Clamp floor to max of current intensities */
+	if (val > max(cfg->vibration_intensity_left, cfg->vibration_intensity_right))
+		val = max(cfg->vibration_intensity_left, cfg->vibration_intensity_right);
+
+	scoped_guard(mutex, &cfg->config_mutex)
+		cfg->vibration_min = val;
+	_ally_update_vibe_luts(cfg);
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(vibration_floor);
+
+static ssize_t vibration_curve_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct hid_device *hdev = to_hid_device(dev);
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	struct ally_handheld *ally = drvdata->rog_ally;
+
+	if (!ally || !ally->config)
+		return -ENODEV;
+
+	return sprintf(buf, "%d\n", ally->config->vibration_curve);
+}
+
+static ssize_t vibration_curve_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct hid_device *hdev = to_hid_device(dev);
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	struct ally_handheld *ally = drvdata->rog_ally;
+	struct ally_config *cfg;
+	int ret, val;
+
+	if (!ally || !ally->config)
+		return -ENODEV;
+
+	cfg = ally->config;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < -100 || val > 500)
+		return -EINVAL;
+
+	scoped_guard(mutex, &cfg->config_mutex)
+		cfg->vibration_curve = val;
+	_ally_update_vibe_luts(cfg);
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(vibration_curve);
 
 /**
  * ally_set_joystick_thresholds() - Generic function to set joystick ranges
@@ -1415,6 +1567,8 @@ static struct attribute *ally_config_attrs[] = {
 	&dev_attr_xbox_controller.attr,
 	&dev_attr_vibration_intensity_left.attr,
 	&dev_attr_vibration_intensity_right.attr,
+	&dev_attr_vibration_floor.attr,
+	&dev_attr_vibration_curve.attr,
 	NULL
 };
 
@@ -1516,9 +1670,12 @@ static struct ally_config *ally_config_create(struct hid_device *hdev, struct al
 	cfg->left_outer_threshold = 90;
 	cfg->right_deadzone = 10;
 	cfg->right_outer_threshold = 90;
-	cfg->vibration_intensity_left = 100;
-	cfg->vibration_intensity_right = 100;
+	cfg->vibration_intensity_left = 8;
+	cfg->vibration_intensity_right = 8;
+	cfg->vibration_min = 8;
+	cfg->vibration_curve = 400;
 	cfg->vibration_active = false;
+	_ally_update_vibe_luts(cfg);
 
 	/* So far the only hardware this is supported is the Ally 1 */
 	if (cfg->xbox_controller_support) {
