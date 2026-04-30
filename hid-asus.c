@@ -276,13 +276,6 @@ struct ally_handheld {
 	/* Ally joystick ring RGB control */
 	struct ally_rgb_dev *led_rgb_dev;
 	struct ally_rgb_data led_rgb_data;
-
-	/* Force feedback (rumble) */
-	struct ff_report *ff_packet;
-	struct work_struct output_worker;
-	bool output_worker_initialized;
-	spinlock_t ff_lock;
-	bool update_ff;
 };
 
 struct asus_drvdata {
@@ -386,23 +379,6 @@ enum ally_command_codes {
 	CMD_CHECK_ANTI_DEADZONE         = 0x17,
 	CMD_SET_ANTI_DEADZONE           = 0x18,
 };
-
-/* Rumble packet structure */
-struct ff_data {
-	u8 enable;
-	u8 magnitude_left;
-	u8 magnitude_right;
-	u8 magnitude_strong;
-	u8 magnitude_weak;
-	u8 pulse_sustain_10ms;
-	u8 pulse_release_10ms;
-	u8 loop_count;
-} __packed;
-
-struct ff_report {
-	u8 report_id;
-	struct ff_data ff;
-} __packed;
 
 static const u8 ALLY_FORCE_FEEDBACK_OFF[] = {
 	0x0D, 0x0F, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEB
