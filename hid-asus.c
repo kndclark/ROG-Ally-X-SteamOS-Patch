@@ -375,6 +375,10 @@ enum ally_command_codes {
 	CMD_SET_ANTI_DEADZONE           = 0x18,
 };
 
+static const u8 ALLY_FORCE_FEEDBACK_OFF[] = {
+	0x0D, 0x0F, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEB
+};
+
 /* Changes to ally_drvdata must lock */
 static DEFINE_MUTEX(ally_data_mutex);
 static struct ally_handheld ally_drvdata = {
@@ -713,6 +717,7 @@ static DEVICE_ATTR_RW(xbox_controller);
  * @cfg: Ally config
  * @left: Left motor intensity (0-100)
  * @right: Right motor intensity (0-100)
+ */
 static int ally_set_vibration_intensity(struct hid_device *hdev, struct ally_config *cfg,
 					u8 left, u8 right)
 {
