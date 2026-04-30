@@ -276,6 +276,13 @@ struct ally_handheld {
 	/* Ally joystick ring RGB control */
 	struct ally_rgb_dev *led_rgb_dev;
 	struct ally_rgb_data led_rgb_data;
+
+	/* Force feedback (rumble) */
+	struct ff_report *ff_packet;
+	struct work_struct output_worker;
+	bool output_worker_initialized;
+	spinlock_t ff_lock;
+	bool update_ff;
 };
 
 struct asus_drvdata {
@@ -379,6 +386,23 @@ enum ally_command_codes {
 	CMD_CHECK_ANTI_DEADZONE         = 0x17,
 	CMD_SET_ANTI_DEADZONE           = 0x18,
 };
+
+/* Rumble packet structure */
+struct ff_data {
+	u8 enable;
+	u8 magnitude_left;
+	u8 magnitude_right;
+	u8 magnitude_strong;
+	u8 magnitude_weak;
+	u8 pulse_sustain_10ms;
+	u8 pulse_release_10ms;
+	u8 loop_count;
+} __packed;
+
+struct ff_report {
+	u8 report_id;
+	struct ff_data ff;
+} __packed;
 
 static const u8 ALLY_FORCE_FEEDBACK_OFF[] = {
 	0x0D, 0x0F, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEB
@@ -1865,6 +1889,56 @@ static struct input_dev *ally_x_alloc_input_dev(struct hid_device *hdev,
 	return input_dev;
 }
 
+static int ally_x_play_effect(struct input_dev *idev, void *data, struct ff_effect *effect)
+{
+	struct ally_handheld *ally = data;
+	unsigned long flags;
+
+	if (effect->type != FF_RUMBLE)
+		return 0;
+
+	spin_lock_irqsave(&ally->ff_lock, flags);
+	if (ally->config) {
+		ally->ff_packet->ff.magnitude_strong =
+			ally->config->vibration_lut[0][effect->u.rumble.strong_magnitude >> 9];
+		ally->ff_packet->ff.magnitude_weak =
+			ally->config->vibration_lut[1][effect->u.rumble.weak_magnitude >> 9];
+	} else {
+		ally->ff_packet->ff.magnitude_strong = effect->u.rumble.strong_magnitude / 512;
+		ally->ff_packet->ff.magnitude_weak = effect->u.rumble.weak_magnitude / 512;
+	}
+	ally->update_ff = true;
+	spin_unlock_irqrestore(&ally->ff_lock, flags);
+
+	if (ally->output_worker_initialized)
+		schedule_work(&ally->output_worker);
+
+	return 0;
+}
+
+static void ally_x_work(struct work_struct *work)
+{
+	struct ally_handheld *ally = container_of(work, struct ally_handheld, output_worker);
+	struct ff_report *ff_report = NULL;
+	bool update_ff = false;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ally->ff_lock, flags);
+	update_ff = ally->update_ff;
+	if (ally->update_ff) {
+		ff_report = kmemdup(ally->ff_packet, sizeof(*ally->ff_packet), GFP_KERNEL);
+		ally->update_ff = false;
+	}
+	spin_unlock_irqrestore(&ally->ff_lock, flags);
+
+	if (update_ff && ff_report) {
+		ff_report->ff.magnitude_left = ff_report->ff.magnitude_strong;
+		ff_report->ff.magnitude_right = ff_report->ff.magnitude_weak;
+		ally_dev_set_report(ally->ally_x_hdev, (u8 *)ff_report, sizeof(*ff_report));
+	}
+	kfree(ff_report);
+}
+
 static int ally_x_setup_input(struct hid_device *hdev, struct ally_handheld *ally)
 {
 	struct input_dev *input = ally_x_alloc_input_dev(hdev, NULL);
@@ -1899,6 +1973,9 @@ static int ally_x_setup_input(struct hid_device *hdev, struct ally_handheld *all
 	input_set_capability(input, EV_KEY, KEY_F18);
 	input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY);
 	input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY1);
+
+	input_set_capability(input, EV_FF, FF_RUMBLE);
+	input_ff_create_memless(input, ally, ally_x_play_effect);
 
 	ret = input_register_device(input);
 	if (ret) {
@@ -2529,6 +2606,21 @@ static struct ally_handheld *hid_asus_ally_probe(struct hid_device *hdev)
 			break;
 		case HID_ALLY_X_INTF_IN:
 			ally_drvdata.ally_x_hdev = hdev;
+
+			/* Setup force feedback worker and packet */
+			INIT_WORK(&ally_drvdata.output_worker, ally_x_work);
+			spin_lock_init(&ally_drvdata.ff_lock);
+			ally_drvdata.output_worker_initialized = true;
+
+			ally_drvdata.ff_packet = devm_kzalloc(&hdev->dev, sizeof(*ally_drvdata.ff_packet), GFP_KERNEL);
+			if (ally_drvdata.ff_packet) {
+				ally_drvdata.ff_packet->report_id = 0x0D;
+				ally_drvdata.ff_packet->ff.enable = 0x0F;
+				ally_drvdata.ff_packet->ff.pulse_sustain_10ms = 0xFF;
+				ally_drvdata.ff_packet->ff.pulse_release_10ms = 0x00;
+				ally_drvdata.ff_packet->ff.loop_count = 0xEB;
+			}
+
 			/* This will create and populate ally_x_input */
 			ret = ally_x_setup_input(hdev, &ally_drvdata);
 			if (ret) {
@@ -2563,6 +2655,13 @@ static void hid_asus_ally_remove(struct hid_device *hdev, struct ally_handheld *
 
 	scoped_guard(mutex, &ally_data_mutex) {
 		if (ally->ally_x_hdev == hdev) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&ally->ff_lock, flags);
+			ally->output_worker_initialized = false;
+			spin_unlock_irqrestore(&ally->ff_lock, flags);
+			cancel_work_sync(&ally->output_worker);
+
 			ally->ally_x_input = NULL;
 			ally->ally_x_hdev = NULL;
 		}
