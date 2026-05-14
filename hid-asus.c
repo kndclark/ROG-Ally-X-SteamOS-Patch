@@ -239,7 +239,7 @@ struct ally_rgb_dev {
  */
 struct ally_rgb_data {
 	enum ally_rgb_effect mode;
-	u8 speed;		/* 0-100, mapped to 3 discrete HW levels */
+	u8 speed;		/* 0-2: index into speed_lut (slow/med/fast) */
 	u8 brightness;		/* cached from led_cdev before device teardown */
 	/*
 	 * SteamOS GameMode appears to write brightness=0 to the sysfs node
@@ -1905,16 +1905,9 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		return -ENODEV;
 
 	if (ally_drvdata.led_rgb_data.mode != ALLY_RGB_EFFECT_STATIC) {
-		u8 speed_idx = ally_drvdata.led_rgb_data.speed;
+		u8 idx = min_t(u8, ally_drvdata.led_rgb_data.speed, 2);
 
-		if (speed_idx <= 33)
-			speed_idx = 0;
-		else if (speed_idx <= 66)
-			speed_idx = 1;
-		else
-			speed_idx = 2;
-
-		rpt.speed = speed_lut[speed_idx];
+		rpt.speed = speed_lut[idx];
 		rpt.direction = 0x01;
 	}
 
@@ -2194,7 +2187,7 @@ static ssize_t speed_store(struct device *dev,
 	ret = kstrtou8(buf, 10, &speed);
 	if (ret)
 		return ret;
-	if (speed > 100)
+	if (speed > 2)
 		return -EINVAL;
 
 	ally_drvdata.led_rgb_data.speed = speed;
@@ -2207,7 +2200,7 @@ static ssize_t speed_store(struct device *dev,
 static ssize_t speed_range_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "0-100\n");
+	return sysfs_emit(buf, "0-2\n");
 }
 
 static ssize_t profile_show(struct device *dev,
