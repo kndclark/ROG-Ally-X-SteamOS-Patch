@@ -1671,7 +1671,6 @@ static bool ally_x_raw_event(struct input_dev *input, struct hid_device *hdev,
 {
 	struct ally_x_input_report *in_report;
 	u8 byte;
-	int keycode = 0;
 
 	if (!input)
 		return false;
@@ -2105,12 +2104,15 @@ static void ally_rgb_resume(void)
 	}
 }
 
-/* Ally RGB sysfs attributes */
+/* Ally RGB sysfs attributes 
+ * TODO: these are mapped to the Legion Go S's LED names for SteamOS GameMode compatibility, 
+ * but will be changed to Asus branded names for upsteamability.
+ */
 
 static const char *const ally_rgb_effect_strings[] = {
-	[ALLY_RGB_EFFECT_STATIC]	= "static",
-	[ALLY_RGB_EFFECT_BREATHING]	= "breathing",
-	[ALLY_RGB_EFFECT_COLOR_CYCLE]	= "color_cycle",
+	[ALLY_RGB_EFFECT_STATIC]	= "monocolor",
+	[ALLY_RGB_EFFECT_BREATHING]	= "breathe",
+	[ALLY_RGB_EFFECT_COLOR_CYCLE]	= "chroma",
 	[ALLY_RGB_EFFECT_RAINBOW]	= "rainbow",
 };
 
