@@ -2189,19 +2189,17 @@ static ssize_t speed_store(struct device *dev,
 		return ret;
 
 	/*
-	 * The SteamOS go_s UI sends 0-100; map to 0-2 discrete levels.
-	 * Direct 0-2 values from sysfs also work as expected.
+	 * The SteamOS go_s UI sends 0-100; always map to 0-2 discrete
+	 * hardware levels. Direct 0-2 writes also land in the slow bucket.
 	 */
-	if (speed > 2) {
-		if (speed <= 33)
-			speed = 0;
-		else if (speed <= 66)
-			speed = 1;
-		else if (speed <= 100)
-			speed = 2;
-		else
-			return -EINVAL;
-	}
+	if (speed <= 33)
+		speed = 0;
+	else if (speed <= 66)
+		speed = 1;
+	else if (speed <= 100)
+		speed = 2;
+	else
+		return -EINVAL;
 
 	ally_drvdata.led_rgb_data.speed = speed;
 	if (ally_drvdata.led_rgb_dev)
