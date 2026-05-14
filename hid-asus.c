@@ -2187,8 +2187,21 @@ static ssize_t speed_store(struct device *dev,
 	ret = kstrtou8(buf, 10, &speed);
 	if (ret)
 		return ret;
-	if (speed > 2)
-		return -EINVAL;
+
+	/*
+	 * The SteamOS go_s UI sends 0-100; map to 0-2 discrete levels.
+	 * Direct 0-2 values from sysfs also work as expected.
+	 */
+	if (speed > 2) {
+		if (speed <= 33)
+			speed = 0;
+		else if (speed <= 66)
+			speed = 1;
+		else if (speed <= 100)
+			speed = 2;
+		else
+			return -EINVAL;
+	}
 
 	ally_drvdata.led_rgb_data.speed = speed;
 	if (ally_drvdata.led_rgb_dev)
