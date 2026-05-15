@@ -219,13 +219,10 @@ struct ally_rgb_dev {
 	struct delayed_work work;
 	struct delayed_work resume_work;
 	bool output_worker_initialized;
-	/* protects: removed, update_rgb, red[], green[], blue[] */
+	/* protects: removed, update_rgb */
 	spinlock_t lock;
 	bool removed;
 	bool update_rgb;
-	u8 red[4];
-	u8 green[4];
-	u8 blue[4];
 };
 
 /*
@@ -1894,9 +1891,9 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		.cmd = ALLY_LED_CMD_CONFIG,
 		.zone = 0x00,
 		.effect = ally_drvdata.led_rgb_data.mode,
-		.red = led_rgb->red[0],
-		.green = led_rgb->green[0],
-		.blue = led_rgb->blue[0],
+		.red = led_rgb->led_rgb_dev.subled_info[0].brightness,
+		.green = led_rgb->led_rgb_dev.subled_info[1].brightness,
+		.blue = led_rgb->led_rgb_dev.subled_info[2].brightness,
 	};
 	u8 buf[ROG_ALLY_REPORT_SIZE] = {};
 	int ret;
@@ -1958,19 +1955,16 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 
 	scoped_guard(spinlock_irqsave, &led->lock) {
 		led->update_rgb = true;
-		/* Broadcast the single R/G/B color to all 4 physical LED zones */
-		for (int i = 0; i < 4; i++) {
-			led->red[i]   = mc_cdev->subled_info[0].brightness;
-			led->green[i] = mc_cdev->subled_info[1].brightness;
-			led->blue[i]  = mc_cdev->subled_info[2].brightness;
-			/*
-			 * Cache unscaled intensity — needed to survive Ally X
-			 * re-probe which destroys the subled_info allocation.
-			 */
-			ally_drvdata.led_rgb_data.red[i] = mc_cdev->subled_info[0].intensity;
-			ally_drvdata.led_rgb_data.green[i] = mc_cdev->subled_info[1].intensity;
-			ally_drvdata.led_rgb_data.blue[i] = mc_cdev->subled_info[2].intensity;
-		}
+	}
+
+	/*
+	 * Cache unscaled intensity on the persistent struct — needed to
+	 * survive the Ally X USB re-probe which destroys subled_info.
+	 */
+	for (int i = 0; i < 4; i++) {
+		ally_drvdata.led_rgb_data.red[i] = mc_cdev->subled_info[0].intensity;
+		ally_drvdata.led_rgb_data.green[i] = mc_cdev->subled_info[1].intensity;
+		ally_drvdata.led_rgb_data.blue[i] = mc_cdev->subled_info[2].intensity;
 	}
 
 	if (brightness > 0)
@@ -2013,16 +2007,19 @@ static void ally_rgb_work_fn(struct work_struct *work)
 static void ally_rgb_store_settings(void)
 {
 	struct ally_rgb_dev *led_rgb = ally_drvdata.led_rgb_dev;
-	int arr_size = sizeof(ally_drvdata.led_rgb_data.red);
+	struct mc_subled *info;
 
 	if (!led_rgb)
 		return;
 
+	info = led_rgb->led_rgb_dev.subled_info;
 	ally_drvdata.led_rgb_data.brightness = led_rgb->led_rgb_dev.led_cdev.brightness;
 
-	memcpy(ally_drvdata.led_rgb_data.red, led_rgb->red, arr_size);
-	memcpy(ally_drvdata.led_rgb_data.green, led_rgb->green, arr_size);
-	memcpy(ally_drvdata.led_rgb_data.blue, led_rgb->blue, arr_size);
+	for (int i = 0; i < 4; i++) {
+		ally_drvdata.led_rgb_data.red[i] = info[0].intensity;
+		ally_drvdata.led_rgb_data.green[i] = info[1].intensity;
+		ally_drvdata.led_rgb_data.blue[i] = info[2].intensity;
+	}
 
 	ally_rgb_apply_effect(led_rgb);
 }
@@ -2035,7 +2032,7 @@ static void ally_rgb_restore_settings(struct ally_rgb_dev *led_rgb,
 				      struct led_classdev *led_cdev,
 				      struct mc_subled *mc_led_info)
 {
-	/* Restore unscaled intensities from cache */
+	/* Restore unscaled intensities from persistent cache */
 	mc_led_info[0].intensity = ally_drvdata.led_rgb_data.red[0];
 	mc_led_info[1].intensity = ally_drvdata.led_rgb_data.green[0];
 	mc_led_info[2].intensity = ally_drvdata.led_rgb_data.blue[0];
@@ -2045,14 +2042,8 @@ static void ally_rgb_restore_settings(struct ally_rgb_dev *led_rgb,
 	else
 		led_cdev->brightness = ally_drvdata.led_rgb_data.last_brightness;
 
-	/* Recalculate scaled hardware colors */
+	/* Recalculate scaled hardware colors from restored intensity */
 	led_mc_calc_color_components(&led_rgb->led_rgb_dev, led_cdev->brightness);
-
-	for (int i = 0; i < 4; i++) {
-		led_rgb->red[i] = mc_led_info[0].brightness;
-		led_rgb->green[i] = mc_led_info[1].brightness;
-		led_rgb->blue[i] = mc_led_info[2].brightness;
-	}
 }
 
 static void ally_rgb_resume_work_fn(struct work_struct *work)
