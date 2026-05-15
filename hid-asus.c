@@ -244,9 +244,9 @@ struct ally_rgb_data {
 	 * restore it on resume when the led_cdev reads as 0.
 	 */
 	u8 last_brightness;
-	u8 red[4];
-	u8 green[4];
-	u8 blue[4];
+	u8 red;			/* unscaled subled intensity (same for all 4 zones) */
+	u8 green;
+	u8 blue;
 	bool enabled;
 	bool initialized;
 };
@@ -1961,11 +1961,9 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 	 * Cache unscaled intensity on the persistent struct — needed to
 	 * survive the Ally X USB re-probe which destroys subled_info.
 	 */
-	for (int i = 0; i < 4; i++) {
-		ally_drvdata.led_rgb_data.red[i] = mc_cdev->subled_info[0].intensity;
-		ally_drvdata.led_rgb_data.green[i] = mc_cdev->subled_info[1].intensity;
-		ally_drvdata.led_rgb_data.blue[i] = mc_cdev->subled_info[2].intensity;
-	}
+	ally_drvdata.led_rgb_data.red = mc_cdev->subled_info[0].intensity;
+	ally_drvdata.led_rgb_data.green = mc_cdev->subled_info[1].intensity;
+	ally_drvdata.led_rgb_data.blue = mc_cdev->subled_info[2].intensity;
 
 	if (brightness > 0)
 		ally_drvdata.led_rgb_data.last_brightness = brightness;
@@ -2000,49 +1998,23 @@ static void ally_rgb_work_fn(struct work_struct *work)
 }
 
 /*
- * Cache RGB state for restoring on suspend/resume.
- * Required because the Ally X fully re-probes the USB device on resume,
- * destroying all devm-managed state including the led_classdev.
+ * Restore intensity and brightness from the persistent cache into a freshly
+ * allocated subled_info and led_cdev after Ally X USB re-probe.
  */
-static void ally_rgb_store_settings(void)
+static void ally_rgb_restore_state(struct ally_rgb_dev *led_rgb)
 {
-	struct ally_rgb_dev *led_rgb = ally_drvdata.led_rgb_dev;
-	struct mc_subled *info;
+	struct led_classdev *led_cdev = &led_rgb->led_rgb_dev.led_cdev;
+	struct mc_subled *info = led_rgb->led_rgb_dev.subled_info;
 
-	if (!led_rgb)
-		return;
-
-	info = led_rgb->led_rgb_dev.subled_info;
-	ally_drvdata.led_rgb_data.brightness = led_rgb->led_rgb_dev.led_cdev.brightness;
-
-	for (int i = 0; i < 4; i++) {
-		ally_drvdata.led_rgb_data.red[i] = info[0].intensity;
-		ally_drvdata.led_rgb_data.green[i] = info[1].intensity;
-		ally_drvdata.led_rgb_data.blue[i] = info[2].intensity;
-	}
-
-	ally_rgb_apply_effect(led_rgb);
-}
-
-/*
- * Restore RGB state from persistent cache after Ally X USB re-probe.
- * See struct ally_rgb_data comment for why this is necessary.
- */
-static void ally_rgb_restore_settings(struct ally_rgb_dev *led_rgb,
-				      struct led_classdev *led_cdev,
-				      struct mc_subled *mc_led_info)
-{
-	/* Restore unscaled intensities from persistent cache */
-	mc_led_info[0].intensity = ally_drvdata.led_rgb_data.red[0];
-	mc_led_info[1].intensity = ally_drvdata.led_rgb_data.green[0];
-	mc_led_info[2].intensity = ally_drvdata.led_rgb_data.blue[0];
+	info[0].intensity = ally_drvdata.led_rgb_data.red;
+	info[1].intensity = ally_drvdata.led_rgb_data.green;
+	info[2].intensity = ally_drvdata.led_rgb_data.blue;
 
 	if (ally_drvdata.led_rgb_data.brightness > 0)
 		led_cdev->brightness = ally_drvdata.led_rgb_data.brightness;
 	else
 		led_cdev->brightness = ally_drvdata.led_rgb_data.last_brightness;
 
-	/* Recalculate scaled hardware colors from restored intensity */
 	led_mc_calc_color_components(&led_rgb->led_rgb_dev, led_cdev->brightness);
 }
 
@@ -2059,7 +2031,7 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 	mc_led_info = led_rgb->led_rgb_dev.subled_info;
 
 	if (ally_drvdata.led_rgb_data.initialized) {
-		ally_rgb_restore_settings(led_rgb, led_cdev, mc_led_info);
+		ally_rgb_restore_state(led_rgb);
 		led_rgb->update_rgb = true;
 		mod_delayed_work(system_wq, &led_rgb->work, 0);
 	}
@@ -2305,7 +2277,7 @@ static int ally_rgb_register(struct hid_device *hdev, struct ally_rgb_dev *led_r
 	led_cdev->color = LED_COLOR_ID_RGB;
 
 	if (ally_drvdata.led_rgb_data.initialized)
-		ally_rgb_restore_settings(led_rgb, led_cdev, mc_led_info);
+		ally_rgb_restore_state(led_rgb);
 
 	ret = devm_led_classdev_multicolor_register(&hdev->dev, &led_rgb->led_rgb_dev);
 	if (ret)
@@ -2468,7 +2440,6 @@ static void hid_asus_ally_remove(struct hid_device *hdev, struct ally_handheld *
 
 		if (ally->cfg_hdev == hdev) {
 			if (ally->led_rgb_dev) {
-				ally_rgb_store_settings();
 				ally_rgb_remove(hdev);
 				ally->led_rgb_dev = NULL;
 			}
