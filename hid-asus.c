@@ -237,6 +237,14 @@ struct ally_rgb_dev {
 struct ally_rgb_data {
 	enum ally_rgb_effect mode;
 	u8 speed;		/* 0-100, mapped to 3 discrete HW levels in apply_effect */
+	/* 
+	 * Minimal intensity cache needed to survive Ally X USB re-probe. 
+	 * The Multicolor LED framework does not restore subled intensities 
+	 * to new device instances automatically.
+	 */
+	u8 red;
+	u8 green;
+	u8 blue;
 	bool enabled;
 	bool initialized;
 };
@@ -1939,6 +1947,9 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 		led->update_rgb = true;
 	}
 
+	ally_drvdata.led_rgb_data.red = mc_cdev->subled_info[0].intensity;
+	ally_drvdata.led_rgb_data.green = mc_cdev->subled_info[1].intensity;
+	ally_drvdata.led_rgb_data.blue = mc_cdev->subled_info[2].intensity;
 	ally_drvdata.led_rgb_data.initialized = true;
 	mod_delayed_work(system_wq, &led->work, 0);
 }
@@ -2222,16 +2233,16 @@ static int ally_rgb_register(struct hid_device *hdev, struct ally_rgb_dev *led_r
 	led_cdev->color = LED_COLOR_ID_RGB;
 
 	/* 
-	 * Set default intensities to White (255). Since the Ally X re-probes 
-	 * on resume, the driver's memory starts empty. Defaulting to white 
-	 * prevents the LEDs from turning black if the user moves a slider 
-	 * (like Speed) before SteamOS re-pushes the actual color.
+	 * Restore saved intensities after Ally X re-probe. The Multicolor 
+	 * LED framework treats this as a fresh device and zeros intensities.
 	 */
-	mc_led_info[0].intensity = 255;
-	mc_led_info[1].intensity = 255;
-	mc_led_info[2].intensity = 255;
+	if (ally_drvdata.led_rgb_data.initialized) {
+		mc_led_info[0].intensity = ally_drvdata.led_rgb_data.red;
+		mc_led_info[1].intensity = ally_drvdata.led_rgb_data.green;
+		mc_led_info[2].intensity = ally_drvdata.led_rgb_data.blue;
+	}
 
-	/* Effect mode/speed are restored via ally_drvdata; color/brightness use defaults */
+	/* Effect mode/speed are restored via ally_drvdata; brightness uses defaults */
 
 	ret = devm_led_classdev_multicolor_register(&hdev->dev, &led_rgb->led_rgb_dev);
 	if (ret)
