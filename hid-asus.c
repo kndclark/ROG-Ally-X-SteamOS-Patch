@@ -1889,9 +1889,9 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		.cmd = ALLY_LED_CMD_CONFIG,
 		.zone = 0x00,
 		.effect = ally_drvdata.led_rgb_data.mode,
-		.red = led_rgb->led_rgb_dev.subled_info[0].intensity,
-		.green = led_rgb->led_rgb_dev.subled_info[1].intensity,
-		.blue = led_rgb->led_rgb_dev.subled_info[2].intensity,
+		.red = led_rgb->led_rgb_dev.subled_info[0].brightness,
+		.green = led_rgb->led_rgb_dev.subled_info[1].brightness,
+		.blue = led_rgb->led_rgb_dev.subled_info[2].brightness,
 	};
 	u8 buf[ROG_ALLY_REPORT_SIZE] = {};
 	int ret;
@@ -1942,6 +1942,13 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 {
 	struct led_classdev_mc *mc_cdev = lcdev_to_mccdev(cdev);
 	struct ally_rgb_dev *led = container_of(mc_cdev, struct ally_rgb_dev, led_rgb_dev);
+
+	/*
+	 * Scale subled intensity by master brightness to provide fine-tuned
+	 * control in the "static" modes (Solid/ Breathe). This compensates for 
+	 * the Ally's coarse 4-level hardware brightness control.
+	 */
+	led_mc_calc_color_components(mc_cdev, brightness);
 
 	scoped_guard(spinlock_irqsave, &led->lock) {
 		led->update_rgb = true;
@@ -2241,6 +2248,9 @@ static int ally_rgb_register(struct hid_device *hdev, struct ally_rgb_dev *led_r
 		mc_led_info[1].intensity = ally_drvdata.led_rgb_data.green;
 		mc_led_info[2].intensity = ally_drvdata.led_rgb_data.blue;
 	}
+
+	/* Initialize scaled brightness values */
+	led_mc_calc_color_components(&led_rgb->led_rgb_dev, led_cdev->brightness);
 
 	/* Effect mode/speed are restored via ally_drvdata; brightness uses defaults */
 
