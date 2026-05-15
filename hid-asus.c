@@ -1978,8 +1978,7 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 	mc_led_info = led_rgb->led_rgb_dev.subled_info;
 
 	if (ally_drvdata.led_rgb_data.initialized) {
-		led_rgb->update_rgb = true;
-		mod_delayed_work(system_wq, &led_rgb->work, 0);
+		ally_rgb_apply_brightness(led_rgb);
 	}
 
 	/* Force release all vendor buttons to prevent "stuck" ghosting on resume (workaround for Ally X USB re-probing during suspend/resume)*/
