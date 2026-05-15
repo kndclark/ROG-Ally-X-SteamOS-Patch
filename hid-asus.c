@@ -2221,7 +2221,17 @@ static int ally_rgb_register(struct hid_device *hdev, struct ally_rgb_dev *led_r
 	led_cdev->brightness_set = ally_rgb_set;
 	led_cdev->color = LED_COLOR_ID_RGB;
 
-	/* Effect mode/speed are restored via ally_rgb_data; color/brightness use defaults */
+	/* 
+	 * Set default intensities to White (255). Since the Ally X re-probes 
+	 * on resume, the driver's memory starts empty. Defaulting to white 
+	 * prevents the LEDs from turning black if the user moves a slider 
+	 * (like Speed) before SteamOS re-pushes the actual color.
+	 */
+	mc_led_info[0].intensity = 255;
+	mc_led_info[1].intensity = 255;
+	mc_led_info[2].intensity = 255;
+
+	/* Effect mode/speed are restored via ally_drvdata; color/brightness use defaults */
 
 	ret = devm_led_classdev_multicolor_register(&hdev->dev, &led_rgb->led_rgb_dev);
 	if (ret)
