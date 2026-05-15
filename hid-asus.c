@@ -237,16 +237,6 @@ struct ally_rgb_dev {
 struct ally_rgb_data {
 	enum ally_rgb_effect mode;
 	u8 speed;		/* 0-100, mapped to 3 discrete HW levels in apply_effect */
-	u8 brightness;		/* cached from led_cdev before device teardown */
-	/*
-	 * SteamOS GameMode appears to write brightness=0 to the sysfs node
-	 * before suspending. We cache the last non-zero value here so we can
-	 * restore it on resume when the led_cdev reads as 0.
-	 */
-	u8 last_brightness;
-	u8 red;			/* unscaled subled intensity (same for all 4 zones) */
-	u8 green;
-	u8 blue;
 	bool enabled;
 	bool initialized;
 };
@@ -1891,9 +1881,9 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		.cmd = ALLY_LED_CMD_CONFIG,
 		.zone = 0x00,
 		.effect = ally_drvdata.led_rgb_data.mode,
-		.red = led_rgb->led_rgb_dev.subled_info[0].brightness,
-		.green = led_rgb->led_rgb_dev.subled_info[1].brightness,
-		.blue = led_rgb->led_rgb_dev.subled_info[2].brightness,
+		.red = led_rgb->led_rgb_dev.subled_info[0].intensity,
+		.green = led_rgb->led_rgb_dev.subled_info[1].intensity,
+		.blue = led_rgb->led_rgb_dev.subled_info[2].intensity,
 	};
 	u8 buf[ROG_ALLY_REPORT_SIZE] = {};
 	int ret;
@@ -1945,35 +1935,11 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 	struct led_classdev_mc *mc_cdev = lcdev_to_mccdev(cdev);
 	struct ally_rgb_dev *led = container_of(mc_cdev, struct ally_rgb_dev, led_rgb_dev);
 
-	/*
-	 * led_mc_calc_color_components scales subled intensity by the master
-	 * brightness to produce per-channel hardware values. This is needed
-	 * because Static/Breathing modes use per-channel RGB values while the
-	 * global hardware brightness (0-3) controls the overall LED power.
-	 */
-	led_mc_calc_color_components(mc_cdev, brightness);
-
 	scoped_guard(spinlock_irqsave, &led->lock) {
 		led->update_rgb = true;
 	}
 
-	/*
-	 * Cache unscaled intensity on the persistent struct — needed to
-	 * survive the Ally X USB re-probe which destroys subled_info.
-	 */
-	ally_drvdata.led_rgb_data.red = mc_cdev->subled_info[0].intensity;
-	ally_drvdata.led_rgb_data.green = mc_cdev->subled_info[1].intensity;
-	ally_drvdata.led_rgb_data.blue = mc_cdev->subled_info[2].intensity;
-
-	if (brightness > 0)
-		ally_drvdata.led_rgb_data.last_brightness = brightness;
-	/*
-	 * Cache brightness on the persistent struct — the led_cdev itself is
-	 * destroyed during the Ally X USB re-probe on resume.
-	 */
-	ally_drvdata.led_rgb_data.brightness = brightness;
 	ally_drvdata.led_rgb_data.initialized = true;
-
 	mod_delayed_work(system_wq, &led->work, 0);
 }
 
@@ -1997,26 +1963,7 @@ static void ally_rgb_work_fn(struct work_struct *work)
 		dev_err(&led->hdev->dev, "Failed to apply RGB brightness: %d\n", ret);
 }
 
-/*
- * Restore intensity and brightness from the persistent cache into a freshly
- * allocated subled_info and led_cdev after Ally X USB re-probe.
- */
-static void ally_rgb_restore_state(struct ally_rgb_dev *led_rgb)
-{
-	struct led_classdev *led_cdev = &led_rgb->led_rgb_dev.led_cdev;
-	struct mc_subled *info = led_rgb->led_rgb_dev.subled_info;
 
-	info[0].intensity = ally_drvdata.led_rgb_data.red;
-	info[1].intensity = ally_drvdata.led_rgb_data.green;
-	info[2].intensity = ally_drvdata.led_rgb_data.blue;
-
-	if (ally_drvdata.led_rgb_data.brightness > 0)
-		led_cdev->brightness = ally_drvdata.led_rgb_data.brightness;
-	else
-		led_cdev->brightness = ally_drvdata.led_rgb_data.last_brightness;
-
-	led_mc_calc_color_components(&led_rgb->led_rgb_dev, led_cdev->brightness);
-}
 
 static void ally_rgb_resume_work_fn(struct work_struct *work)
 {
@@ -2031,7 +1978,6 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 	mc_led_info = led_rgb->led_rgb_dev.subled_info;
 
 	if (ally_drvdata.led_rgb_data.initialized) {
-		ally_rgb_restore_state(led_rgb);
 		led_rgb->update_rgb = true;
 		mod_delayed_work(system_wq, &led_rgb->work, 0);
 	}
@@ -2276,8 +2222,7 @@ static int ally_rgb_register(struct hid_device *hdev, struct ally_rgb_dev *led_r
 	led_cdev->brightness_set = ally_rgb_set;
 	led_cdev->color = LED_COLOR_ID_RGB;
 
-	if (ally_drvdata.led_rgb_data.initialized)
-		ally_rgb_restore_state(led_rgb);
+	/* Effect mode/speed are restored via ally_rgb_data; color/brightness use defaults */
 
 	ret = devm_led_classdev_multicolor_register(&hdev->dev, &led_rgb->led_rgb_dev);
 	if (ret)
