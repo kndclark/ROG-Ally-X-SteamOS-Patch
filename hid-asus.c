@@ -1222,10 +1222,10 @@ static ssize_t right_joystick_anti_deadzone_store(struct device *dev, struct dev
 
 static DEVICE_ATTR_RW(right_joystick_anti_deadzone);
 
-ALLY_DEVICE_CONST_ATTR_RO(left_joystick_anti_deadzone_min, inner_threshold_min, "0\n");
-ALLY_DEVICE_CONST_ATTR_RO(left_joystick_anti_deadzone_max, inner_threshold_max, "100\n");
-ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_min, outer_threshold_min, "0\n");
-ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_max, outer_threshold_max, "100\n");
+ALLY_DEVICE_CONST_ATTR_RO(left_joystick_anti_deadzone_min, anti_deadzone_min, "0\n");
+ALLY_DEVICE_CONST_ATTR_RO(left_joystick_anti_deadzone_max, anti_deadzone_max, "100\n");
+ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_min, anti_deadzone_min, "0\n");
+ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_max, anti_deadzone_max, "100\n");
 
 /**
  * ally_set_trigger_ranges() - Generic function to set triggers ranges
@@ -1458,7 +1458,7 @@ static struct attribute *left_joystick_axis_attrs[] = {
 	&dev_attr_left_joystick_inner_threshold_max.attr,
 	&dev_attr_left_joystick_anti_deadzone.attr,
 	&dev_attr_left_joystick_anti_deadzone_min.attr,
-	&dev_attr_left_joystick_anti_deadzone_min.attr,
+	&dev_attr_left_joystick_anti_deadzone_max.attr,
 	NULL
 };
 
@@ -1469,7 +1469,7 @@ static struct attribute *right_joystick_axis_attrs[] = {
 	&dev_attr_right_joystick_outer_threshold_max.attr,
 	&dev_attr_right_joystick_anti_deadzone.attr,
 	&dev_attr_right_joystick_anti_deadzone_min.attr,
-	&dev_attr_right_joystick_anti_deadzone_min.attr,
+	&dev_attr_right_joystick_anti_deadzone_max.attr,
 	NULL
 };
 
