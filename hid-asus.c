@@ -2612,9 +2612,15 @@ static int asus_raw_event(struct hid_device *hdev,
 	if (drvdata->quirks & QUIRK_MEDION_E1239T)
 		return asus_e1239t_event(drvdata, data, size);
 
+	/*
+	 * Return 1 to suppress further processing by the generic HID
+	 * input parser for reports we fully handle for the Gamepad (0x0B).
+	 * If we let 0x0B fall through then the default parser creates a
+	 * generic gamepad causing Steam Input overlaps (i.e. L1 stuck on screenshot).
+	 */
 	if ((drvdata->quirks & QUIRK_ROG_ALLY_XPAD) &&
 	    hid_asus_ally_raw_event(hdev, drvdata->rog_ally, report, data, size))
-		return 0;
+		return 1;
 
 	/*
 	 * Skip these report ID, the device emits a continuous stream associated
