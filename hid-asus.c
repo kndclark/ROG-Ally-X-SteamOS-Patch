@@ -182,7 +182,6 @@ struct ally_rgb_report {
 	struct device_attribute dev_attr_##_name = \
 		__ATTR(_sysfs_name, 0444, _name##_show, NULL)
 
-#define ALLY_DEVICE_CONST_ATTR_RO(fname, sysfs_name, value)			\
 #define ALLY_DEVICE_ATTR_WO(_name, _sysfs_name)			\
 	struct device_attribute dev_attr_##_name =			\
 		__ATTR(_sysfs_name, 0200, NULL, _name##_store)
@@ -1772,7 +1771,6 @@ static struct attribute *left_joystick_axis_attrs[] = {
 	&dev_attr_left_joystick_inner_threshold_max.attr,
 	&dev_attr_left_joystick_anti_deadzone.attr,
 	&dev_attr_left_joystick_anti_deadzone_min.attr,
-	&dev_attr_left_joystick_anti_deadzone_max.attr,
 	&dev_attr_left_joystick_anti_deadzone_max.attr,
 	&dev_attr_response_curve_pct_1_left.attr,
 	&dev_attr_response_curve_pct_2_left.attr,
