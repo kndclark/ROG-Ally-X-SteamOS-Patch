@@ -1398,10 +1398,10 @@ static ssize_t right_joystick_anti_deadzone_store(struct device *dev, struct dev
 
 static DEVICE_ATTR_RW(right_joystick_anti_deadzone);
 
-ALLY_DEVICE_CONST_ATTR_RO(left_joystick_anti_deadzone_min, inner_threshold_min, "0\n");
-ALLY_DEVICE_CONST_ATTR_RO(left_joystick_anti_deadzone_max, inner_threshold_max, "100\n");
-ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_min, outer_threshold_min, "0\n");
-ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_max, outer_threshold_max, "100\n");
+ALLY_DEVICE_CONST_ATTR_RO(left_joystick_anti_deadzone_min, anti_deadzone_min, "0\n");
+ALLY_DEVICE_CONST_ATTR_RO(left_joystick_anti_deadzone_max, anti_deadzone_max, "100\n");
+ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_min, anti_deadzone_min, "0\n");
+ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_max, anti_deadzone_max, "100\n");
 
 /**
  * ally_set_trigger_ranges() - Generic function to set triggers ranges
@@ -1636,7 +1636,7 @@ static struct attribute *left_joystick_axis_attrs[] = {
 	&dev_attr_left_joystick_inner_threshold_max.attr,
 	&dev_attr_left_joystick_anti_deadzone.attr,
 	&dev_attr_left_joystick_anti_deadzone_min.attr,
-	&dev_attr_left_joystick_anti_deadzone_min.attr,
+	&dev_attr_left_joystick_anti_deadzone_max.attr,
 	NULL
 };
 
@@ -1647,7 +1647,7 @@ static struct attribute *right_joystick_axis_attrs[] = {
 	&dev_attr_right_joystick_outer_threshold_max.attr,
 	&dev_attr_right_joystick_anti_deadzone.attr,
 	&dev_attr_right_joystick_anti_deadzone_min.attr,
-	&dev_attr_right_joystick_anti_deadzone_min.attr,
+	&dev_attr_right_joystick_anti_deadzone_max.attr,
 	NULL
 };
 
@@ -1714,16 +1714,8 @@ static struct ally_config *ally_config_create(struct hid_device *hdev, struct al
 	}
 
 	for (sysfs_i = 0; sysfs_i < ARRAY_SIZE(ally_attr_groups); sysfs_i++) {
-		ret = sysfs_create_group(&hdev->dev.kobj, &ally_attr_groups[sysfs_i]);
-		/*
-		 * SteamOS guard: Valve's Neptune kernel patches create a
-		 * 'left_joystick_axis' sysfs group on the parent HID device
-		 * during probe. Our driver also creates a group with the same
-		 * name. On vanilla kernels this collision does not occur.
-		 * TODO: remove this guard once this driver is integrated into
-		 * the Neptune kernel and the collision is resolved upstream.
-		 */
-		if (ret < 0 && ret != -EEXIST) {
+		ret = devm_device_add_group(&hdev->dev, &ally_attr_groups[sysfs_i]);
+		if (ret < 0) {
 			hid_err(hdev, "Failed to create sysfs group '%s': %d\n",
 				ally_attr_groups[sysfs_i].name, ret);
 			goto ally_config_create_sysfs_err;
@@ -1770,14 +1762,9 @@ ally_config_create_err:
 static void ally_config_remove(struct hid_device *hdev, struct ally_handheld *ally)
 {
 	struct ally_config *cfg = ally->config;
-	int i;
 
 	if (!cfg || !cfg->initialized)
 		return;
-
-	/* Remove all attribute groups in reverse order */
-	for (i = ARRAY_SIZE(ally_attr_groups) - 1; i >= 0; i--)
-		sysfs_remove_group(&hdev->dev.kobj, &ally_attr_groups[i]);
 }
 
 /*
@@ -1883,28 +1870,6 @@ static bool ally_x_raw_event(struct input_dev *input, struct hid_device *hdev,
 		input_sync(input);
 
 		return true;
-	} else if (data[0] == 0x5A) {
-		/*
-		 * The MCU used on Ally provides many devices such as:
-		 * gamepad, keyboord, mouse and possibly others.
-		 * The AC and QAM buttons route through another interface,
-		 * making it difficult to use the events unless we grab those
-		 * and use them here. Only works for Ally X.
-		 */
-		byte = data[1];
-
-		/* Right Armoury Crate button: 0x93 for the Xbox ROG Ally X */
-		input_report_key(input, KEY_PROG1, byte == 0x38 || byte == 0x93);
-		/* Left/XBox button */
-		input_report_key(input, KEY_F16, byte == 0xA6);
-		/* QAM long press */
-		input_report_key(input, KEY_F17, byte == 0xA7);
-		/* QAM long press released */
-		input_report_key(input, KEY_F18, byte == 0xA8);
-
-		input_sync(input);
-
-		return byte == 0xA6 || byte == 0xA7 || byte == 0xA8 || byte == 0x38;
 	}
 
 	return false;
@@ -2890,16 +2855,24 @@ static int asus_raw_event(struct hid_device *hdev,
 	if (drvdata->quirks & QUIRK_MEDION_E1239T)
 		return asus_e1239t_event(drvdata, data, size);
 
-	/*
-	 * Return -1 to suppress further processing by the generic HID
-	 * input parser. In SteamOS Game Mode, without this suppression,
-	 * vendor button reports (0x5a) are processed twice — once by our
-	 * raw_event handler and once by the default keyboard mapper —
-	 * causing "stuck" button states and phantom key combinations.
-	 */
-	if ((drvdata->quirks & QUIRK_ROG_ALLY_XPAD) &&
-	    hid_asus_ally_raw_event(hdev, drvdata->rog_ally, report, data, size))
-		return -1;
+	if (drvdata->quirks & QUIRK_ROG_ALLY_XPAD) {
+		/*
+		 * The Ally MCU sends a non-standard byte (0xA8) for QAM long-press
+		 * release instead of a standard 0x00. We map it to 0x00 here so the
+		 * generic parser can natively handle the key release for 0xA7.
+		 */
+		if (data[0] == 0x5A && data[1] == 0xA8)
+			data[1] = 0x00;
+
+		/*
+		 * Return -1 to suppress further processing by the generic HID
+		 * input parser for reports we fully handle for the Gamepad (0x0B).
+		 * If we let 0x0B fall through then the default parser creates a
+		 * generic gamepad causing Steam Input overlaps (i.e. L1 stuck on screenshot).
+		 */
+		if (hid_asus_ally_raw_event(hdev, drvdata->rog_ally, report, data, size))
+			return -1;
+	}
 
 	/*
 	 * Skip these report ID, the device emits a continuous stream associated
@@ -3558,6 +3531,7 @@ static int asus_input_mapping(struct hid_device *hdev,
 		case 0x8b: asus_map_key_clear(KEY_PROG1);	break; /* ProArt Creator Hub key */
 		case 0x6b: asus_map_key_clear(KEY_F21);		break; /* ASUS touchpad toggle */
 		case 0x38: asus_map_key_clear(KEY_PROG1);	break; /* ROG key */
+		case 0x93: asus_map_key_clear(KEY_PROG1);	break; /* ROG Ally X right AC button */
 		case 0xba: asus_map_key_clear(KEY_PROG2);	break; /* Fn+C ASUS Splendid */
 		case 0x5c: asus_map_key_clear(KEY_PROG3);	break; /* Fn+Space Power4Gear */
 		case 0x99: asus_map_key_clear(KEY_PROG4);	break; /* Fn+F5 "fan" symbol */
@@ -3570,7 +3544,6 @@ static int asus_input_mapping(struct hid_device *hdev,
 		case 0xa5: asus_map_key_clear(KEY_F15);		break; /* ROG Ally left back */
 		case 0xa6: asus_map_key_clear(KEY_F16);		break; /* ROG Ally QAM button */
 		case 0xa7: asus_map_key_clear(KEY_F17);		break; /* ROG Ally ROG long-press */
-		case 0xa8: asus_map_key_clear(KEY_F18);		break; /* ROG Ally ROG long-press-release */
 
 		default:
 			/* ASUS lazily declares 256 usages, ignore the rest,
