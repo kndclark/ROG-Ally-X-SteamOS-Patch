@@ -1536,16 +1536,8 @@ static struct ally_config *ally_config_create(struct hid_device *hdev, struct al
 	}
 
 	for (sysfs_i = 0; sysfs_i < ARRAY_SIZE(ally_attr_groups); sysfs_i++) {
-		ret = sysfs_create_group(&hdev->dev.kobj, &ally_attr_groups[sysfs_i]);
-		/*
-		 * SteamOS guard: Valve's Neptune kernel patches create a
-		 * 'left_joystick_axis' sysfs group on the parent HID device
-		 * during probe. Our driver also creates a group with the same
-		 * name. On vanilla kernels this collision does not occur.
-		 * TODO: remove this guard once this driver is integrated into
-		 * the Neptune kernel and the collision is resolved upstream.
-		 */
-		if (ret < 0 && ret != -EEXIST) {
+		ret = devm_device_add_group(&hdev->dev, &ally_attr_groups[sysfs_i]);
+		if (ret < 0) {
 			hid_err(hdev, "Failed to create sysfs group '%s': %d\n",
 				ally_attr_groups[sysfs_i].name, ret);
 			goto ally_config_create_sysfs_err;
@@ -1589,14 +1581,9 @@ ally_config_create_err:
 static void ally_config_remove(struct hid_device *hdev, struct ally_handheld *ally)
 {
 	struct ally_config *cfg = ally->config;
-	int i;
 
 	if (!cfg || !cfg->initialized)
 		return;
-
-	/* Remove all attribute groups in reverse order */
-	for (i = ARRAY_SIZE(ally_attr_groups) - 1; i >= 0; i--)
-		sysfs_remove_group(&hdev->dev.kobj, &ally_attr_groups[i]);
 }
 
 /*
