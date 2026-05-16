@@ -2612,15 +2612,24 @@ static int asus_raw_event(struct hid_device *hdev,
 	if (drvdata->quirks & QUIRK_MEDION_E1239T)
 		return asus_e1239t_event(drvdata, data, size);
 
-	/*
-	 * Return 1 to suppress further processing by the generic HID
-	 * input parser for reports we fully handle for the Gamepad (0x0B).
-	 * If we let 0x0B fall through then the default parser creates a
-	 * generic gamepad causing Steam Input overlaps (i.e. L1 stuck on screenshot).
-	 */
-	if ((drvdata->quirks & QUIRK_ROG_ALLY_XPAD) &&
-	    hid_asus_ally_raw_event(hdev, drvdata->rog_ally, report, data, size))
-		return 1;
+	if (drvdata->quirks & QUIRK_ROG_ALLY_XPAD) {
+		/*
+		 * The Ally MCU sends a non-standard byte (0xA8) for QAM long-press
+		 * release instead of a standard 0x00. We map it to 0x00 here so the
+		 * generic parser can natively handle the key release for 0xA7.
+		 */
+		if (data[0] == 0x5A && data[1] == 0xA8)
+			data[1] = 0x00;
+
+		/*
+		 * Return -1 to suppress further processing by the generic HID
+		 * input parser for reports we fully handle for the Gamepad (0x0B).
+		 * If we let 0x0B fall through then the default parser creates a
+		 * generic gamepad causing Steam Input overlaps (i.e. L1 stuck on screenshot).
+		 */
+		if (hid_asus_ally_raw_event(hdev, drvdata->rog_ally, report, data, size))
+			return -1;
+	}
 
 	/*
 	 * Skip these report ID, the device emits a continuous stream associated
@@ -3292,7 +3301,6 @@ static int asus_input_mapping(struct hid_device *hdev,
 		case 0xa5: asus_map_key_clear(KEY_F15);		break; /* ROG Ally left back */
 		case 0xa6: asus_map_key_clear(KEY_F16);		break; /* ROG Ally QAM button */
 		case 0xa7: asus_map_key_clear(KEY_F17);		break; /* ROG Ally ROG long-press */
-		case 0xa8: asus_map_key_clear(KEY_F18);		break; /* ROG Ally ROG long-press-release */
 
 		default:
 			/* ASUS lazily declares 256 usages, ignore the rest,
