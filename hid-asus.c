@@ -1777,11 +1777,7 @@ static struct ally_config *ally_config_create(struct hid_device *hdev, struct al
 	}
 
 	for (sysfs_i = 0; sysfs_i < ARRAY_SIZE(ally_attr_groups); sysfs_i++) {
-<<<<<<< HEAD
-		ret = sysfs_create_group(&hdev->dev.kobj, &ally_attr_groups[sysfs_i]);
-=======
 		ret = devm_device_add_group(&hdev->dev, &ally_attr_groups[sysfs_i]);
->>>>>>> ally_led_migration_steamos
 		if (ret < 0) {
 			hid_err(hdev, "Failed to create sysfs group '%s': %d\n",
 				ally_attr_groups[sysfs_i].name, ret);
