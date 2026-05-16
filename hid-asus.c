@@ -1702,28 +1702,6 @@ static bool ally_x_raw_event(struct input_dev *input, struct hid_device *hdev,
 		input_sync(input);
 
 		return true;
-	} else if (data[0] == 0x5A) {
-		/*
-		 * The MCU used on Ally provides many devices such as:
-		 * gamepad, keyboord, mouse and possibly others.
-		 * The AC and QAM buttons route through another interface,
-		 * making it difficult to use the events unless we grab those
-		 * and use them here. Only works for Ally X.
-		 */
-		byte = data[1];
-
-		/* Right Armoury Crate button: 0x93 for the Xbox ROG Ally X */
-		input_report_key(input, KEY_PROG1, byte == 0x38 || byte == 0x93);
-		/* Left/XBox button */
-		input_report_key(input, KEY_F16, byte == 0xA6);
-		/* QAM long press */
-		input_report_key(input, KEY_F17, byte == 0xA7);
-		/* QAM long press released */
-		input_report_key(input, KEY_F18, byte == 0xA8);
-
-		input_sync(input);
-
-		return byte == 0xA6 || byte == 0xA7 || byte == 0xA8 || byte == 0x38;
 	}
 
 	return false;
@@ -2634,16 +2612,9 @@ static int asus_raw_event(struct hid_device *hdev,
 	if (drvdata->quirks & QUIRK_MEDION_E1239T)
 		return asus_e1239t_event(drvdata, data, size);
 
-	/*
-	 * Return -1 to suppress further processing by the generic HID
-	 * input parser. In SteamOS Game Mode, without this suppression,
-	 * vendor button reports (0x5a) are processed twice — once by our
-	 * raw_event handler and once by the default keyboard mapper —
-	 * causing "stuck" button states and phantom key combinations.
-	 */
 	if ((drvdata->quirks & QUIRK_ROG_ALLY_XPAD) &&
 	    hid_asus_ally_raw_event(hdev, drvdata->rog_ally, report, data, size))
-		return -1;
+		return 0;
 
 	/*
 	 * Skip these report ID, the device emits a continuous stream associated
@@ -3302,6 +3273,7 @@ static int asus_input_mapping(struct hid_device *hdev,
 		case 0x8b: asus_map_key_clear(KEY_PROG1);	break; /* ProArt Creator Hub key */
 		case 0x6b: asus_map_key_clear(KEY_F21);		break; /* ASUS touchpad toggle */
 		case 0x38: asus_map_key_clear(KEY_PROG1);	break; /* ROG key */
+		case 0x93: asus_map_key_clear(KEY_PROG1);	break; /* ROG Ally X right AC button */
 		case 0xba: asus_map_key_clear(KEY_PROG2);	break; /* Fn+C ASUS Splendid */
 		case 0x5c: asus_map_key_clear(KEY_PROG3);	break; /* Fn+Space Power4Gear */
 		case 0x99: asus_map_key_clear(KEY_PROG4);	break; /* Fn+F5 "fan" symbol */
