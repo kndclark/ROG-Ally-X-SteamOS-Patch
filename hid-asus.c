@@ -2083,6 +2083,25 @@ static struct ally_config *ally_config_create(struct hid_device *hdev, struct al
 	cfg->right_curve.entry_4.move = 100;
 	cfg->right_curve.entry_4.resp = 100;
 
+	/* Initialize default response curve values (linear) */
+	cfg->left_curve.entry_1.move = 0;
+	cfg->left_curve.entry_1.resp = 0;
+	cfg->left_curve.entry_2.move = 33;
+	cfg->left_curve.entry_2.resp = 33;
+	cfg->left_curve.entry_3.move = 66;
+	cfg->left_curve.entry_3.resp = 66;
+	cfg->left_curve.entry_4.move = 100;
+	cfg->left_curve.entry_4.resp = 100;
+
+	cfg->right_curve.entry_1.move = 0;
+	cfg->right_curve.entry_1.resp = 0;
+	cfg->right_curve.entry_2.move = 33;
+	cfg->right_curve.entry_2.resp = 33;
+	cfg->right_curve.entry_3.move = 66;
+	cfg->right_curve.entry_3.resp = 66;
+	cfg->right_curve.entry_4.move = 100;
+	cfg->right_curve.entry_4.resp = 100;
+
 	/* So far the only hardware this is supported is the Ally 1 */
 	if (cfg->xbox_controller_support) {
 		ret = ally_set_xbox_controller(hdev, cfg, true);
