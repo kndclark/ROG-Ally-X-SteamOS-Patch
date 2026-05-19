@@ -12,3 +12,6 @@ sync-upstream:
 	@chmod +x ./sync_upstream.sh
 	@./sync_upstream.sh
 
+diff-upstream:
+	@git diff nero/for-next:drivers/hid/hid-asus.c hid-asus.c
+

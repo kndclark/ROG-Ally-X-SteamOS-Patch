@@ -1,13 +1,10 @@
 #!/bin/bash
 # sync_upstream.sh
 # Safely pulls and merges upstream changes for hid-asus.c from 'nero/for-next'
-# using a temporary branch for normalization.
+# directly using a clean 3-way merge on the file. No branch switching, no temporary
+# branches, and completely immune to Windows case-insensitive filesystem crashes.
 
 set -e
-
-# Detect the active branch to return to
-ACTIVE_BRANCH=$(git symbolic-ref --short HEAD)
-echo "Active branch detected: $ACTIVE_BRANCH"
 
 # Check for uncommitted changes in hid-asus.c specifically
 if [ -n "$(git status --porcelain hid-asus.c)" ]; then
@@ -19,45 +16,35 @@ fi
 echo "Fetching latest changes from 'nero' remote..."
 git fetch nero
 
-# Safely delete any pre-existing temp-upstream-sync branch
-if git show-ref --quiet refs/heads/temp-upstream-sync; then
-    echo "Deleting existing 'temp-upstream-sync' branch..."
-    git branch -D temp-upstream-sync
-fi
-
-# Use the last clean upstream common ancestor commit as the base for the temp branch
-# to prevent Git from performing a fast-forward merge that discards your custom LED changes.
+# 1. Extract the clean base version of the file from the last common upstream ancestor
+# (this has triggers configuration but NO LED changes, ensuring Git treats your LED code as a local addition)
 BASE_COMMIT="7267f5623efb3314d752c447fad1a3924cc2b3cc"
-echo "Creating temporary branch 'temp-upstream-sync' from base commit $BASE_COMMIT..."
-git checkout -b temp-upstream-sync "$BASE_COMMIT"
+echo "Extracting clean base version from commit $BASE_COMMIT..."
+git show "$BASE_COMMIT:drivers/hid/hid-asus.c" > .hid-asus.c.base
 
-echo "Checking out hid-asus.c from nero/for-next..."
-git checkout nero/for-next -- drivers/hid/hid-asus.c
+# 2. Extract Nero's latest upstream version
+echo "Extracting latest upstream version..."
+git show nero/for-next:drivers/hid/hid-asus.c > .hid-asus.c.upstream
 
-echo "Normalizing hid-asus.c to repository root..."
-mv drivers/hid/hid-asus.c ./hid-asus.c
-rm -rf drivers/
+# 3. Perform the in-place 3-way merge directly on hid-asus.c
+echo "================================================================="
+echo "Performing in-place 3-way merge directly on hid-asus.c..."
+echo "================================================================="
 
-git add hid-asus.c
-git commit -m "Normalize upstream hid-asus.c to root for merging"
-
-echo "Switching back to active branch '$ACTIVE_BRANCH'..."
-git checkout "$ACTIVE_BRANCH"
-
-echo "Merging temporary branch 'temp-upstream-sync'..."
-# Disable set -e temporarily because git merge returns non-zero when conflicts exist
+# Disable set -e temporarily because git merge-file returns non-zero when conflicts exist
 set +e
-git merge temp-upstream-sync -m "Merge upstream changes from nero/for-next"
+git merge-file hid-asus.c .hid-asus.c.base .hid-asus.c.upstream
 MERGE_STATUS=$?
 set -e
 
-# Delete the temporary branch
-echo "Cleaning up temporary branch..."
-git branch -D temp-upstream-sync
+# 4. Cleanup temporary files
+rm -f .hid-asus.c.base .hid-asus.c.upstream
 
 if [ $MERGE_STATUS -eq 0 ]; then
-    echo "Success! Upstream changes merged cleanly."
+    echo "Success! Upstream changes merged cleanly into hid-asus.c."
 else
-    echo "Merge finished with conflicts (this is expected when both branches modify adjacent code)."
-    echo "Please resolve conflict markers in hid-asus.c (or open your merge editor), then commit the merge."
+    echo ""
+    echo "Merge finished with CONFLICTS (this is expected when both sides modify the same lines)."
+    echo "Conflict markers have been inserted into 'hid-asus.c' in your active branch."
+    echo "Please open 'hid-asus.c' in your merge editor (e.g. VS Code Merge Editor) to review and resolve the conflicts."
 fi
