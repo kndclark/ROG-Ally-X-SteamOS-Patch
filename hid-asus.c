@@ -3033,6 +3033,8 @@ err_free_entries:
 	if (mappings)
 		devm_kfree(&hdev->dev, mappings);
 	devm_kfree(&hdev->dev, entries);
+	cfg->button_entries = NULL;
+	cfg->button_mappings = NULL;
 	return ret;
 }
 
@@ -3151,8 +3153,6 @@ static struct ally_config *ally_config_create(struct hid_device *hdev, struct al
 ally_config_create_sysfs_err:
 	if (cfg->turbo_support && cfg->button_entries)
 		ally_remove_button_attributes(hdev, cfg);
-	while (--sysfs_i >= 0)
-		sysfs_remove_group(&hdev->dev.kobj, &ally_attr_groups[sysfs_i]);
 ally_config_create_err:
 	ally->config = NULL;
 	devm_kfree(&hdev->dev, cfg);
@@ -3174,9 +3174,6 @@ static void ally_config_remove(struct hid_device *hdev, struct ally_handheld *al
 	if (cfg->turbo_support && cfg->button_entries)
 		ally_remove_button_attributes(hdev, cfg);
 
-	/* Remove all attribute groups in reverse order */
-	for (i = ARRAY_SIZE(ally_attr_groups) - 1; i >= 0; i--)
-		sysfs_remove_group(&hdev->dev.kobj, &ally_attr_groups[i]);
 }
 
 /*
@@ -3531,11 +3528,11 @@ static void ally_rgb_work_fn(struct work_struct *work)
 	}
 
 	ret = ally_rgb_apply_effect(led);
-	if (ret)
+	if (ret < 0)
 		dev_err(&led->hdev->dev, "Failed to apply RGB effect: %d\n", ret);
 
 	ret = ally_rgb_apply_brightness(led);
-	if (ret)
+	if (ret < 0)
 		dev_err(&led->hdev->dev, "Failed to apply RGB brightness: %d\n", ret);
 }
 

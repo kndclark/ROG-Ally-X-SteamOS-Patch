@@ -6,7 +6,13 @@ all:
 	make -C $(KDIR) M=$(PWD) modules
 
 clean:
-	make -C $(KDIR) M=$(PWD) clean
+	@if [ -d "$(KDIR)" ]; then \
+		make -C $(KDIR) M=$(PWD) clean; \
+	else \
+		echo "Warning: KDIR ($(KDIR)) not found, cleaning local files manually."; \
+		rm -f *.o *.ko *.mod* *.mod *.a .*.cmd *.symvers *.order *.ko.zst; \
+		rm -rf .tmp_versions; \
+	fi
 
 sync-upstream:
 	@chmod +x ./sync_upstream.sh
