@@ -7,3 +7,8 @@ all:
 
 clean:
 	make -C $(KDIR) M=$(PWD) clean
+
+sync-upstream:
+	@chmod +x ./sync_upstream.sh
+	@./sync_upstream.sh
+
