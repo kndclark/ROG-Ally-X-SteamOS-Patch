@@ -100,13 +100,40 @@ fi
 log "Detected required headers: $HEADER_PKG"
 
 # Install base-devel and headers
-pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd
+if [ -d "/lib/modules/$(uname -r)/build" ]; then
+    log "Headers for running kernel $(uname -r) are already installed. Skipping headers package installation."
+    pacman -Sy --needed --noconfirm base-devel zstd
+else
+    pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd
+fi
 
 # --- 5. Build and Install ---
 
-log "Building module..."
-make clean
-make all
+log "Detecting kernel headers..."
+KVER=$(uname -r)
+if [ -d "/lib/modules/${KVER}/build" ]; then
+    log "Found build headers for running kernel: ${KVER}"
+else
+    log "Headers for running kernel ${KVER} not found. Searching for installed headers..."
+    KVER=""
+    for d in /lib/modules/*; do
+        if [ -d "${d}/build" ]; then
+            KVER=$(basename "${d}")
+            log "Found active kernel headers: ${KVER}"
+            break
+        fi
+    done
+fi
+
+if [ -z "${KVER}" ]; then
+    error "Could not find any directory under /lib/modules/ containing a 'build' folder. Please install linux headers."
+fi
+
+KDIR="/lib/modules/${KVER}/build"
+
+log "Building module using headers at ${KDIR}..."
+make clean KDIR="${KDIR}"
+make all KDIR="${KDIR}"
 
 if [ ! -f "$MODULE_FILE" ]; then
     error "Build failed! $MODULE_FILE not found."
