@@ -2045,30 +2045,6 @@ static ssize_t effect_index_show(struct device *dev,
 	return len;
 }
 
-/*
- * SteamOS GameMode expects a 'mode' attribute. The Ally hardware only
- * operates in 'custom' mode (user-selectable effects via the effect attr).
- * These stubs satisfy the UI requirement without affecting behavior.
- */
-static ssize_t mode_show(struct device *dev,
-			 struct device_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "custom\n");
-}
-
-static ssize_t mode_store(struct device *dev,
-			  struct device_attribute *attr,
-			  const char *buf, size_t count)
-{
-	return count;
-}
-
-static ssize_t mode_index_show(struct device *dev,
-			       struct device_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "dynamic custom\n");
-}
-
 static ssize_t speed_show(struct device *dev,
 			  struct device_attribute *attr, char *buf)
 {
@@ -2152,8 +2128,6 @@ static ssize_t enabled_index_show(struct device *dev,
 
 static DEVICE_ATTR_RW(effect);
 static DEVICE_ATTR_RO(effect_index);
-static DEVICE_ATTR_RW(mode);
-static DEVICE_ATTR_RO(mode_index);
 static DEVICE_ATTR_RW(speed);
 static DEVICE_ATTR_RO(speed_range);
 static DEVICE_ATTR_RW(profile);
@@ -2164,8 +2138,6 @@ static DEVICE_ATTR_RO(enabled_index);
 static struct attribute *ally_rgb_attrs[] = {
 	&dev_attr_effect.attr,
 	&dev_attr_effect_index.attr,
-	&dev_attr_mode.attr,
-	&dev_attr_mode_index.attr,
 	&dev_attr_speed.attr,
 	&dev_attr_speed_range.attr,
 	&dev_attr_profile.attr,
