@@ -964,12 +964,9 @@ static ssize_t gamepad_modes_available_show(struct device *dev,
 static DEVICE_ATTR_RW(gamepad_mode);
 static DEVICE_ATTR_RO(gamepad_modes_available);
 
-static int ally_set_default_gamepad_mode(struct hid_device *hdev,
+static int ally_set_default_gamepad_mode(struct hid_device *hdev, struct ally_handheld *ally,
 					 struct ally_config *cfg)
 {
-	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
-	struct ally_handheld *ally = drvdata->rog_ally;
-
 	cfg->gamepad_mode = ALLY_GAMEPAD_MODE_GAMEPAD;
 
 	return ally_set_gamepad_mode(ally, hdev, cfg->gamepad_mode);
@@ -3108,10 +3105,6 @@ static struct ally_config *ally_config_create(struct hid_device *hdev, struct al
 		}
 	}
 
-	ret = ally_set_default_gamepad_mode(hdev, cfg);
-	if (ret < 0)
-		hid_warn(hdev, "Failed to set default gamepad mode: %d\n", ret);
-
 	cfg->gamepad_mode = 0x01;
 	cfg->left_deadzone = 10;
 	cfg->left_outer_threshold = 90;
@@ -3184,13 +3177,13 @@ static void ally_config_remove(struct hid_device *hdev, struct ally_handheld *al
 static int ally_gamepad_check_ready(struct hid_device *hdev)
 {
 	u8 payload[] = { 0x00 };
-	int ret;
-
-	u8 *buf __free(kfree) = ally_alloc_cmd(CMD_CHECK_READY, payload, sizeof(payload));
-	if (!buf)
-		return -ENOMEM;
+	int ret = -ENODEV;
 
 	for (int i = 0; i < HID_ALLY_READY_MAX_TRIES; i++) {
+		u8 *buf __free(kfree) = ally_alloc_cmd(CMD_CHECK_READY, payload, sizeof(payload));
+		if (!buf)
+			return -ENOMEM;
+
 		ret = ally_gamepad_send_receive_packet(&ally_drvdata, hdev, buf, ROG_ALLY_REPORT_SIZE);
 		if (ret < 0) {
 			hid_dbg(hdev, "ROG Ally check %d/%d failed: %d\n", i,
@@ -3205,7 +3198,7 @@ static int ally_gamepad_check_ready(struct hid_device *hdev)
 	}
 
 	hid_err(hdev, "ROG Ally never responded with a ready\n");
-	return -ENODEV;
+	return ret;
 }
 
 static u8 ally_get_endpoint_address(struct hid_device *hdev)
@@ -3891,6 +3884,12 @@ static struct ally_handheld *hid_asus_ally_probe(struct hid_device *hdev)
 			}
 			ally_drvdata.config = ally_cfg;
 
+			/* Finish the initialization of the MCU */
+			ret = hid_asus_ally_init(hdev);
+			if (ret < 0)
+				return ERR_PTR(ret);
+
+
 			/* LED ring init — non-fatal if it fails */
 			ally_drvdata.led_rgb_dev = ally_rgb_create(hdev);
 			if (IS_ERR(ally_drvdata.led_rgb_dev)) {
@@ -3920,11 +3919,6 @@ static struct ally_handheld *hid_asus_ally_probe(struct hid_device *hdev)
 			/* This is normally supposed to happen */
 			break;
 		}
-
-	/* Finish the initialization of the MCU */
-	ret = hid_asus_ally_init(hdev);
-	if (ret < 0)
-		return ERR_PTR(ret);
 
 	return &ally_drvdata;
 }

@@ -174,18 +174,21 @@ depmod -a
 # --- 6. Reload Module ---
 
 if [ "$KVER" = "$(uname -r)" ]; then
-    log "Reloading module..."
-    if lsmod | grep -q "${MODULE_NAME//-/_}"; then
-        modprobe -r "${MODULE_NAME//-/_}"
-    fi
-    modprobe "${MODULE_NAME//-/_}"
-
-    log "Verifying installation..."
-    if lsmod | grep -q "${MODULE_NAME//-/_}"; then
-        log "Module '$MODULE_NAME' loaded successfully."
+    log "Rebuilding initramfs to ensure the new driver is correctly loaded on boot..."
+    if command -v mkinitcpio >/dev/null 2>&1; then
+        mkinitcpio -P || true
+    elif command -v dracut >/dev/null 2>&1; then
+        dracut --force || true
+    elif command -v update-initramfs >/dev/null 2>&1; then
+        update-initramfs -u || true
     else
-        error "Module failed to load. Check 'dmesg' for details."
+        warn "No initramfs builder (mkinitcpio/dracut/update-initramfs) found. You may need to update it manually."
     fi
+
+    log "Installation complete!"
+    warn "To avoid kernel panics, the module was NOT dynamically reloaded."
+    warn "Please REBOOT your system to load the newly installed driver."
+
 
     # --- 7. Final Status ---
 
