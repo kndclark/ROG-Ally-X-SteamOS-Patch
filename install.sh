@@ -12,7 +12,7 @@ MODULE_ZST="${MODULE_FILE}.zst"
 STUB_NAME="asus-wmi-stub"
 STUB_FILE="${STUB_NAME}.ko"
 STUB_ZST="${STUB_FILE}.zst"
-# INSTALL_PATH will be determined after detecting the kernel version
+INSTALL_PATH="/lib/modules/$(uname -r)/kernel/drivers/hid/"
 # Get the actual user if running via sudo
 TARGET_USER="${SUDO_USER:-$(whoami)}"
 
@@ -100,29 +100,11 @@ fi
 log "Detected required headers: $HEADER_PKG"
 
 # Install base-devel and headers
-if [ -f "/lib/modules/$(uname -r)/build/scripts/Kbuild.include" ]; then
+if [ -d "/lib/modules/$(uname -r)/build" ]; then
     log "Headers for running kernel $(uname -r) are already installed. Skipping headers package installation."
     pacman -Sy --needed --noconfirm base-devel zstd
 else
-    # Try to download exact headers for the running kernel from the SteamOS archive
-    KVER_BASE=$(echo $KERNEL_VER | cut -d'-' -f1)
-    KVER_REL=$(echo $KERNEL_VER | cut -d'-' -f2,3)
-    HEADER_PKG_NAME="${HEADER_PKG}-${KVER_BASE}.${KVER_REL}-x86_64.pkg.tar.zst"
-    URL="https://steamdeck-packages.steamos.cloud/archlinux-mirror/jupiter-main/os/x86_64/${HEADER_PKG_NAME}"
-    
-    log "Attempting to download exact headers for $(uname -r) from SteamOS archive..."
-    if curl --output /dev/null --silent --head --fail "$URL"; then
-        log "Found exact headers! Downloading..."
-        curl -L -o "/tmp/${HEADER_PKG_NAME}" "$URL"
-        log "Installing (forcing overwrite of any broken leftover files)..."
-        pacman -Sy --needed --noconfirm base-devel zstd
-        pacman -U --noconfirm --overwrite "*" "/tmp/${HEADER_PKG_NAME}"
-        rm -f "/tmp/${HEADER_PKG_NAME}"
-    else
-        warn "Exact headers not found on mirror ($URL)."
-        warn "Falling back to pacman repository version (this may fetch headers for a newer pending OS update)..."
-        pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd
-    fi
+    pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd
 fi
 
 # --- 5. Build and Install ---
@@ -132,11 +114,22 @@ KVER=$(uname -r)
 if [ -d "/lib/modules/${KVER}/build" ]; then
     log "Found build headers for running kernel: ${KVER}"
 else
-    error "Headers for running kernel ${KVER} not found. You may need to reboot to apply pending SteamOS updates, or manually downgrade/install the headers matching your current kernel."
+    log "Headers for running kernel ${KVER} not found. Searching for installed headers..."
+    KVER=""
+    for d in /lib/modules/*; do
+        if [ -d "${d}/build" ]; then
+            KVER=$(basename "${d}")
+            log "Found active kernel headers: ${KVER}"
+            break
+        fi
+    done
+fi
+
+if [ -z "${KVER}" ]; then
+    error "Could not find any directory under /lib/modules/ containing a 'build' folder. Please install linux headers."
 fi
 
 KDIR="/lib/modules/${KVER}/build"
-INSTALL_PATH="/lib/modules/${KVER}/kernel/drivers/hid/"
 
 log "Building module using headers at ${KDIR}..."
 make clean KDIR="${KDIR}"
@@ -173,32 +166,23 @@ depmod -a
 
 # --- 6. Reload Module ---
 
-if [ "$KVER" = "$(uname -r)" ]; then
-    log "Rebuilding initramfs to ensure the new driver is correctly loaded on boot..."
-    if command -v mkinitcpio >/dev/null 2>&1; then
-        mkinitcpio -P || true
-    elif command -v dracut >/dev/null 2>&1; then
-        dracut --force || true
-    elif command -v update-initramfs >/dev/null 2>&1; then
-        update-initramfs -u || true
-    else
-        warn "No initramfs builder (mkinitcpio/dracut/update-initramfs) found. You may need to update it manually."
-    fi
-
-    log "Installation complete!"
-    warn "To avoid kernel panics, the module was NOT dynamically reloaded."
-    warn "Please REBOOT your system to load the newly installed driver."
-
-
-    # --- 7. Final Status ---
-
-    log "Installation complete!"
-    log "Checking dmesg for Ally X registration..."
-    dmesg | grep -i "asus" | tail -n 5 || true
-else
-    log "Module was built and installed for kernel ${KVER}."
-    log "You are currently running kernel $(uname -r)."
-    log "Please reboot your system to use the new module."
+log "Reloading module..."
+if lsmod | grep -q "${MODULE_NAME//-/_}"; then
+    modprobe -r "${MODULE_NAME//-/_}"
 fi
+modprobe "${MODULE_NAME//-/_}"
+
+log "Verifying installation..."
+if lsmod | grep -q "${MODULE_NAME//-/_}"; then
+    log "Module '$MODULE_NAME' loaded successfully."
+else
+    error "Module failed to load. Check 'dmesg' for details."
+fi
+
+# --- 7. Final Status ---
+
+log "Installation complete!"
+log "Checking dmesg for Ally X registration..."
+dmesg | grep -i "asus" | tail -n 5 || true
 
 log "Note: SteamOS updates will reset the filesystem. Simply re-run this script after an update to restore the driver."

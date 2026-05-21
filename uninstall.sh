@@ -41,15 +41,15 @@ fi
 
 # --- 2. Restoration Logic ---
 
-# Turn off LEDs while driver is still active
-log "Turning off LED rings..."
-for led_path in /sys/class/leds/*:rgb:joystick_rings/brightness; do
-    if [ -f "$led_path" ]; then
-        echo 0 > "$led_path" || warn "Could not turn off LED at $led_path"
-    fi
-done
-
 if [ -f "$BACKUP_FILE" ]; then
+    # Turn off LEDs while driver is still active
+    log "Turning off LED rings..."
+    for led_path in /sys/class/leds/*:rgb:joystick_rings/brightness; do
+        if [ -f "$led_path" ]; then
+            echo 0 > "$led_path" || warn "Could not turn off LED at $led_path"
+        fi
+    done
+
     log "Restoring original driver from backup ($BACKUP_FILE)..."
     cp -f "$BACKUP_FILE" "$TARGET_FILE"
     rm -f "$BACKUP_FILE"
@@ -94,18 +94,11 @@ fi
 log "Updating dependency map..."
 depmod -a
 
-log "Rebuilding initramfs to ensure the original driver is used on next boot..."
-if command -v mkinitcpio >/dev/null 2>&1; then
-    mkinitcpio -P || true
-elif command -v dracut >/dev/null 2>&1; then
-    dracut --force || true
-elif command -v update-initramfs >/dev/null 2>&1; then
-    update-initramfs -u || true
-else
-    warn "No initramfs builder (mkinitcpio/dracut/update-initramfs) found. You may need to update it manually."
+log "Reloading module..."
+if lsmod | grep -q "${MODULE_NAME//-/_}"; then
+    modprobe -r "${MODULE_NAME//-/_}"
 fi
+modprobe "${MODULE_NAME//-/_}" || warn "Original module failed to load. It may have been removed."
 
 log "Uninstallation complete!"
-warn "To avoid kernel panics (verbose shutdown/reboot), the active module was NOT dynamically unloaded."
-warn "Please REBOOT your system now to fully restore the original driver."
 warn "Note: If you re-enabled read-only mode manually, remember to lock it if desired: sudo steamos-readonly enable"
