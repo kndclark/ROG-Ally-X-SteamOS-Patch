@@ -3365,6 +3365,13 @@ static int hid_asus_ally_init(struct hid_device *hdev)
 	if (ret < 0)
 		hid_err(hdev, "Ally failed to init force-feedback off: %d\n", ret);
 
+	/* Set the default gamepad mode now that the MCU is confirmed ready */
+	if (ally_drvdata.config) {
+		ret = ally_set_default_gamepad_mode(hdev, &ally_drvdata, ally_drvdata.config);
+		if (ret < 0)
+			hid_warn(hdev, "Failed to set default gamepad mode: %d\n", ret);
+	}
+
 	return 0;
 }
 
@@ -3521,11 +3528,11 @@ static void ally_rgb_work_fn(struct work_struct *work)
 	}
 
 	ret = ally_rgb_apply_effect(led);
-	if (ret)
+	if (ret < 0)
 		dev_err(&led->hdev->dev, "Failed to apply RGB effect: %d\n", ret);
 
 	ret = ally_rgb_apply_brightness(led);
-	if (ret)
+	if (ret < 0)
 		dev_err(&led->hdev->dev, "Failed to apply RGB brightness: %d\n", ret);
 }
 
