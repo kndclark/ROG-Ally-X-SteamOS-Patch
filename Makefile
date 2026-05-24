@@ -14,10 +14,16 @@ clean:
 		rm -rf .tmp_versions; \
 	fi
 
-sync-upstream:
+configure:
+	@if ! git remote get-url nero >/dev/null 2>&1; then \
+		echo "Adding remote 'nero'..."; \
+		git remote add nero https://github.com/NeroReflex/linux.git; \
+	fi
+
+sync-upstream: configure
 	@chmod +x ./sync_upstream.sh
 	@./sync_upstream.sh
 
-diff-upstream:
+diff-upstream: configure
 	@git diff nero/for-next:drivers/hid/hid-asus.c hid-asus.c
 
