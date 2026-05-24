@@ -164,10 +164,6 @@ cp -f "$STUB_ZST" "${INSTALL_PATH}/${STUB_ZST}"
 log "Updating dependency map..."
 depmod -a
 
-log "Blacklisting stock hid-asus-ally module to prevent conflicts and dmesg warnings..."
-echo "blacklist hid_asus_ally" > /etc/modprobe.d/hid-asus-ally-blacklist.conf
-echo "blacklist hid-asus-ally" >> /etc/modprobe.d/hid-asus-ally-blacklist.conf
-
 # --- 6. Reload Module ---
 
 log "Reloading module..."
