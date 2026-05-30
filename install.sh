@@ -104,7 +104,18 @@ if [ -d "/lib/modules/$(uname -r)/build" ]; then
     log "Headers for running kernel $(uname -r) are already installed. Skipping headers package installation."
     pacman -Sy --needed --noconfirm base-devel zstd
 else
-    pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd
+    # Attempt to fetch exact headers for the current kernel to prevent upgrading past the active OS image
+    KERNEL_VER_CLEAN=$(echo "$KERNEL_VER" | sed -E 's/([0-9]+)\.([0-9]+)\.([0-9]+)-([^-]+)-([0-9]+)-.*/\1.\2.\3.\4-\5/')
+    EXACT_PKG_URL="https://steamdeck-packages.steamos.cloud/archlinux-mirror/jupiter-main/os/x86_64/${HEADER_PKG}-${KERNEL_VER_CLEAN}-x86_64.pkg.tar.zst"
+    
+    if curl -s -f -I "$EXACT_PKG_URL" > /dev/null; then
+        log "Found exact matching headers in SteamOS archive for $KERNEL_VER_CLEAN"
+        pacman -Sy --needed --noconfirm base-devel zstd
+        pacman -U --noconfirm "$EXACT_PKG_URL"
+    else
+        warn "Exact matching headers for $KERNEL_VER not found in archive. Falling back to latest."
+        pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd
+    fi
 fi
 
 # --- 5. Build and Install ---
