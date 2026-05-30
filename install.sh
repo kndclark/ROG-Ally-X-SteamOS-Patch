@@ -12,7 +12,7 @@ MODULE_ZST="${MODULE_FILE}.zst"
 STUB_NAME="asus-wmi-stub"
 STUB_FILE="${STUB_NAME}.ko"
 STUB_ZST="${STUB_FILE}.zst"
-INSTALL_PATH="/lib/modules/$(uname -r)/kernel/drivers/hid/"
+# INSTALL_PATH will be set after kernel version detection
 # Get the actual user if running via sudo
 TARGET_USER="${SUDO_USER:-$(whoami)}"
 
@@ -130,6 +130,7 @@ if [ -z "${KVER}" ]; then
 fi
 
 KDIR="/lib/modules/${KVER}/build"
+INSTALL_PATH="/lib/modules/${KVER}/kernel/drivers/hid/"
 
 log "Building module using headers at ${KDIR}..."
 make clean KDIR="${KDIR}"
@@ -165,6 +166,12 @@ log "Updating dependency map..."
 depmod -a
 
 # --- 6. Reload Module ---
+
+if [ "${KVER}" != "$(uname -r)" ]; then
+    warn "Module was built for kernel ${KVER} but you are running $(uname -r)."
+    warn "Installation is complete for the new kernel. Please reboot your Steam Deck to use the new kernel and the module."
+    exit 0
+fi
 
 log "Reloading module..."
 if lsmod | grep -q "${MODULE_NAME//-/_}"; then

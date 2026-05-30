@@ -25,5 +25,5 @@ sync-upstream: configure
 	@./sync_upstream.sh
 
 diff-upstream: configure
+	@git fetch nero >/dev/null 2>&1 || true
 	@git diff nero/for-next:drivers/hid/hid-asus.c hid-asus.c
-
