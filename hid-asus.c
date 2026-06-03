@@ -1759,7 +1759,12 @@ ally_x_setup_input_err:
 
 static int hid_asus_ally_init(struct hid_device *hdev)
 {
+	int ep = ally_get_endpoint_address(hdev);
 	int ret;
+
+	/* Only initialize the MCU on the configuration/gamepad endpoint */
+	if (ep != HID_ALLY_INTF_CFG_IN && ep != HID_ALLY_X_INTF_IN)
+		return 0;
 
 	/*
 	 * This function assumes the asus-specific initialization
@@ -3402,7 +3407,14 @@ static int asus_start_multitouch(struct hid_device *hdev)
 
 static int asus_initialize_reports(struct hid_device *hdev)
 {
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
 	int ret;
+
+	if (drvdata->quirks & QUIRK_ROG_ALLY_XPAD) {
+		int ep = ally_get_endpoint_address(hdev);
+		if (ep == HID_ALLY_INTF_CFG_IN || ep == HID_ALLY_X_INTF_IN)
+			return 0;
+	}
 
 	for (int r = 0; r < ARRAY_SIZE(asus_report_id_init); r++) {
 		if (asus_has_report_id(hdev, asus_report_id_init[r])) {
