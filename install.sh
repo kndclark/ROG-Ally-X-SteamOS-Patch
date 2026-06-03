@@ -12,7 +12,7 @@ MODULE_ZST="${MODULE_FILE}.zst"
 STUB_NAME="asus-wmi-stub"
 STUB_FILE="${STUB_NAME}.ko"
 STUB_ZST="${STUB_FILE}.zst"
-INSTALL_PATH="/lib/modules/$(uname -r)/kernel/drivers/hid/"
+# INSTALL_PATH will be set after kernel version detection
 # Get the actual user if running via sudo
 TARGET_USER="${SUDO_USER:-$(whoami)}"
 
@@ -100,13 +100,52 @@ fi
 log "Detected required headers: $HEADER_PKG"
 
 # Install base-devel and headers
-pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd
+if [ -d "/lib/modules/$(uname -r)/build" ]; then
+    log "Headers for running kernel $(uname -r) are already installed. Skipping headers package installation."
+    pacman -Sy --needed --noconfirm base-devel zstd
+else
+    # Attempt to fetch exact headers for the current kernel to prevent upgrading past the active OS image
+    KERNEL_VER_CLEAN=$(echo "$KERNEL_VER" | sed -E 's/([0-9]+)\.([0-9]+)\.([0-9]+)-([^-]+)-([0-9]+)-.*/\1.\2.\3.\4-\5/')
+    EXACT_PKG_URL="https://steamdeck-packages.steamos.cloud/archlinux-mirror/jupiter-main/os/x86_64/${HEADER_PKG}-${KERNEL_VER_CLEAN}-x86_64.pkg.tar.zst"
+    
+    if curl -s -f -I "$EXACT_PKG_URL" > /dev/null; then
+        log "Found exact matching headers in SteamOS archive for $KERNEL_VER_CLEAN"
+        pacman -Sy --needed --noconfirm base-devel zstd
+        pacman -U --noconfirm "$EXACT_PKG_URL"
+    else
+        warn "Exact matching headers for $KERNEL_VER not found in archive. Falling back to latest."
+        pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd
+    fi
+fi
 
 # --- 5. Build and Install ---
 
-log "Building module..."
-make clean
-make all
+log "Detecting kernel headers..."
+KVER=$(uname -r)
+if [ -d "/lib/modules/${KVER}/build" ]; then
+    log "Found build headers for running kernel: ${KVER}"
+else
+    log "Headers for running kernel ${KVER} not found. Searching for installed headers..."
+    KVER=""
+    for d in /lib/modules/*; do
+        if [ -d "${d}/build" ]; then
+            KVER=$(basename "${d}")
+            log "Found active kernel headers: ${KVER}"
+            break
+        fi
+    done
+fi
+
+if [ -z "${KVER}" ]; then
+    error "Could not find any directory under /lib/modules/ containing a 'build' folder. Please install linux headers."
+fi
+
+KDIR="/lib/modules/${KVER}/build"
+INSTALL_PATH="/lib/modules/${KVER}/kernel/drivers/hid/"
+
+log "Building module using headers at ${KDIR}..."
+make clean KDIR="${KDIR}"
+make all KDIR="${KDIR}"
 
 if [ ! -f "$MODULE_FILE" ]; then
     error "Build failed! $MODULE_FILE not found."
@@ -138,6 +177,12 @@ log "Updating dependency map..."
 depmod -a
 
 # --- 6. Reload Module ---
+
+if [ "${KVER}" != "$(uname -r)" ]; then
+    warn "Module was built for kernel ${KVER} but you are running $(uname -r)."
+    warn "Installation is complete for the new kernel. Please reboot your Steam Deck to use the new kernel and the module."
+    exit 0
+fi
 
 log "Reloading module..."
 if lsmod | grep -q "${MODULE_NAME//-/_}"; then
