@@ -2924,7 +2924,7 @@ static int mcu_request_version(struct hid_device *hdev)
 	return ret;
 }
 
-static void validate_mcu_fw_version(struct hid_device *hdev, int idProduct)
+void validate_mcu_fw_version(struct hid_device *hdev, int idProduct)
 {
 	int min_version, version;
 
@@ -2952,6 +2952,7 @@ static void validate_mcu_fw_version(struct hid_device *hdev, int idProduct)
 		set_ally_mcu_powersave(true);
 	}
 }
+EXPORT_SYMBOL_NS(validate_mcu_fw_version, "HID_ASUS");
 
 static bool asus_has_report_id(struct hid_device *hdev, u16 report_id)
 {
