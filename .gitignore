@@ -1,0 +1,11 @@
+*.o
+*.ko
+*.mod.c
+*.mod.o
+*.mod
+*.symvers
+*.order
+.*.cmd
+*.zst
+sniff_out.txt
+__pycache__/
