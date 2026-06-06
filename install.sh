@@ -185,9 +185,13 @@ if [ "${KVER}" != "$(uname -r)" ]; then
 fi
 
 log "Reloading module..."
-if lsmod | grep -q "${MODULE_NAME//-/_}"; then
-    modprobe -r "${MODULE_NAME//-/_}"
+if lsmod | grep -q "hid_asus_ally"; then
+    modprobe -r hid_asus_ally || true
 fi
+if lsmod | grep -q "hid_asus"; then
+    modprobe -r hid_asus || true
+fi
+modprobe hid-asus || true
 modprobe "${MODULE_NAME//-/_}"
 
 log "Verifying installation..."

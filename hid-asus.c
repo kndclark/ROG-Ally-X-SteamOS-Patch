@@ -688,8 +688,11 @@ static bool handle_ally_event(struct hid_device *hdev, u8 *data, int size)
 static int ally_gamepad_send_packet(struct ally_handheld *ally,
 			     struct hid_device *hdev, const u8 *buf, size_t len)
 {
-	scoped_guard(mutex, &ally->intf_mutex)
+	scoped_guard(mutex, &ally->intf_mutex) {
+		print_hex_dump(KERN_INFO, "ALLY_DRV_RAW: ", DUMP_PREFIX_OFFSET, 16, 1, buf, len, false);
 		return ally_dev_set_report(hdev, buf, len);
+	}
+	return -ENODEV;
 }
 
 /**
@@ -708,6 +711,7 @@ static int ally_gamepad_send_receive_packet(struct ally_handheld *ally,
 	int ret;
 
 	scoped_guard(mutex, &ally->intf_mutex) {
+		print_hex_dump(KERN_INFO, "ALLY_DRV_RAW: ", DUMP_PREFIX_OFFSET, 16, 1, buf, len, false);
 		ret = ally_dev_set_report(hdev, buf, len);
 		if (ret >= 0) {
 			memset(buf, 0, len);
@@ -3670,15 +3674,19 @@ static int ally_rgb_apply_brightness(struct ally_rgb_dev *led_rgb)
 		     ALLY_LED_BRIGHTNESS_CMD2, ALLY_LED_BRIGHTNESS_CMD3, 0x00 };
 	u8 level;
 
-	/* Map 0-100 to 0-3 hardware levels */
-	if (br == 0 || !ally_drvdata.led_rgb_data.enabled)
-		level = 0;
-	else if (br <= 33)
-		level = 1;
-	else if (br <= 66)
-		level = 2;
-	else
-		level = 3;
+	if (ally_drvdata.led_rgb_data.mode == ALLY_RGB_EFFECT_STATIC) {
+		level = (br > 0 && ally_drvdata.led_rgb_data.enabled) ? 3 : 0;
+	} else {
+		/* Map 0-100 to 0-3 hardware levels for animations */
+		if (br == 0 || !ally_drvdata.led_rgb_data.enabled)
+			level = 0;
+		else if (br <= 33)
+			level = 1;
+		else if (br <= 66)
+			level = 2;
+		else
+			level = 3;
+	}
 
 	buf[4] = level;
 
@@ -3764,7 +3772,7 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 	ally_drvdata.led_rgb_data.green = mc_cdev->subled_info[1].intensity;
 	ally_drvdata.led_rgb_data.blue = mc_cdev->subled_info[2].intensity;
 	ally_drvdata.led_rgb_data.initialized = true;
-	mod_delayed_work(system_wq, &led->work, 0);
+	queue_delayed_work(system_wq, &led->work, msecs_to_jiffies(30));
 }
 
 static void ally_rgb_work_fn(struct work_struct *work)
@@ -4054,13 +4062,6 @@ static struct ally_rgb_dev *ally_rgb_create(struct hid_device *hdev)
 	if (!led_rgb)
 		return ERR_PTR(-ENOMEM);
 
-	ret = ally_rgb_register(hdev, led_rgb);
-	if (ret < 0) {
-		cancel_delayed_work_sync(&led_rgb->work);
-		devm_kfree(&hdev->dev, led_rgb);
-		return ERR_PTR(ret);
-	}
-
 	led_rgb->hdev = hdev;
 	led_rgb->removed = false;
 
@@ -4068,6 +4069,14 @@ static struct ally_rgb_dev *ally_rgb_create(struct hid_device *hdev)
 	INIT_DELAYED_WORK(&led_rgb->resume_work, ally_rgb_resume_work_fn);
 	led_rgb->output_worker_initialized = true;
 	spin_lock_init(&led_rgb->lock);
+
+	ret = ally_rgb_register(hdev, led_rgb);
+	if (ret < 0) {
+		cancel_delayed_work_sync(&led_rgb->work);
+		cancel_delayed_work_sync(&led_rgb->resume_work);
+		devm_kfree(&hdev->dev, led_rgb);
+		return ERR_PTR(ret);
+	}
 
 	/* Initialize state if not already done */
 	if (!ally_drvdata.led_rgb_data.initialized)
@@ -5278,7 +5287,6 @@ static int __maybe_unused asus_reset_resume(struct hid_device *hdev)
 asus_reset_resume_err:
 	return ret;
 }
-
 static int asus_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
 	struct hid_report_enum *rep_enum;
@@ -5363,7 +5371,6 @@ static int asus_probe(struct hid_device *hdev, const struct hid_device_id *id)
 			return ret;
 		}
 	}
-
 	ret = hid_parse(hdev);
 	if (ret) {
 		hid_err(hdev, "Asus hid parse failed: %d\n", ret);
