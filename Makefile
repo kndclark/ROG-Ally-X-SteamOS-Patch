@@ -27,3 +27,10 @@ sync-upstream: configure
 diff-upstream: configure
 	@git diff nero/for-next:drivers/hid/hid-asus.c hid-asus.c
 
+	make -C $(KDIR) M=$(PWD) clean
+
+test:
+	@echo " Running Ally X LED Tests...\
+ @echo \Note: Tests require root privileges and access to /dev/hidraw2\
+ @echo \Please run individual tests manually e.g.:\
+ @echo " sudo python3 tests/test_flicker.py /dev/hidraw2\
