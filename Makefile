@@ -5,6 +5,12 @@ KDIR ?= /lib/modules/$(shell uname -r)/build
 all:
 	make -C $(KDIR) M=$(PWD) modules
 
+deploy:
+	@echo "Running full deploy pipeline..."
+	sudo ./build_all.sh
+	cd usbhid_custom && sudo ./install.sh
+	cd usbhid_custom && sudo ./bind_custom.sh
+
 clean:
 	@if [ -d "$(KDIR)" ]; then \
 		make -C $(KDIR) M=$(PWD) clean; \
@@ -29,6 +35,12 @@ diff-upstream: configure
 	@git diff nero/for-next:drivers/hid/hid-asus.c hid-asus.c
 
 	make -C $(KDIR) M=$(PWD) clean
+
+deploy:
+	@echo "Running full deploy pipeline..."
+	sudo ./build_all.sh
+	cd usbhid_custom && sudo ./install.sh
+	cd usbhid_custom && sudo ./bind_custom.sh
 
 test:
 	@echo " Running Ally X LED Tests...\
