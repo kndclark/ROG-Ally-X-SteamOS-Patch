@@ -25,6 +25,7 @@ sync-upstream: configure
 	@./sync_upstream.sh
 
 diff-upstream: configure
+	@git fetch nero
 	@git diff nero/for-next:drivers/hid/hid-asus.c hid-asus.c
 
 	make -C $(KDIR) M=$(PWD) clean
