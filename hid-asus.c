@@ -689,7 +689,6 @@ static int ally_gamepad_send_packet(struct ally_handheld *ally,
 			     struct hid_device *hdev, const u8 *buf, size_t len)
 {
 	scoped_guard(mutex, &ally->intf_mutex) {
-		print_hex_dump(KERN_INFO, "ALLY_DRV_RAW: ", DUMP_PREFIX_OFFSET, 16, 1, buf, len, false);
 		return ally_dev_set_report(hdev, buf, len);
 	}
 	return -ENODEV;
@@ -711,7 +710,6 @@ static int ally_gamepad_send_receive_packet(struct ally_handheld *ally,
 	int ret;
 
 	scoped_guard(mutex, &ally->intf_mutex) {
-		print_hex_dump(KERN_INFO, "ALLY_DRV_RAW: ", DUMP_PREFIX_OFFSET, 16, 1, buf, len, false);
 		ret = ally_dev_set_report(hdev, buf, len);
 		if (ret >= 0) {
 			memset(buf, 0, len);
