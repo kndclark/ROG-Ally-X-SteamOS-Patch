@@ -232,7 +232,7 @@ struct ally_rgb_dev {
 	bool removed;
 	bool update_rgb;
 	bool update_effect;
-	/* last 0x5d hardware level sent; -1 forces a resend (MCU reset) */
+	/* Last 0x5d hardware level; -1 forces resend. */
 	int last_hw_level;
 };
 
@@ -3426,11 +3426,7 @@ static int ally_rgb_apply_brightness(struct ally_rgb_dev *led_rgb)
 	int ret;
 
 	if (ally_drvdata.led_rgb_data.mode == ALLY_RGB_EFFECT_STATIC) {
-		/*
-		 * Dimming in static mode is software RGB scaling on the
-		 * volatile direct path; "off" is RGB(0,0,0). Hold the
-		 * hardware level at max so this report is written once.
-		 */
+		/* Dimming in static mode uses software scaling; hardware level fixed at max. */
 		level = 3;
 	} else {
 		/* Map 0-100 to 0-3 hardware levels for animations */
@@ -3444,10 +3440,7 @@ static int ally_rgb_apply_brightness(struct ally_rgb_dev *led_rgb)
 			level = 3;
 	}
 
-	/*
-	 * The 0x5d brightness report may be NV-backed in the MCU (it is on
-	 * other ASUS Aura devices). Only send it on actual level changes.
-	 */
+	/* Send brightness report only on level changes; may be NV-backed. */
 	if (level == led_rgb->last_hw_level)
 		return 0;
 
@@ -3508,13 +3501,7 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 	if (ret < 0)
 		return ret;
 
-	/*
-	 * Latch the staged config: a 0xb3 alone is inert until SET (0xb5)
-	 * makes it the active state. APPLY (0xb4) is deliberately NOT sent
-	 * here — it commits the active state to MCU non-volatile storage
-	 * and belongs in ally_rgb_commit() on the suspend path only.
-	 * Streaming 0xb4 at update rate progressively corrupts the MCU.
-	 */
+	/* Config (0xb3) stages; SET (0xb5) applies; APPLY (0xb4) commits to NV on suspend. */
 	return ally_dev_set_report(led_rgb->hdev, set_buf, sizeof(set_buf));
 }
 
@@ -3561,20 +3548,12 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 	struct led_classdev_mc *mc_cdev = lcdev_to_mccdev(cdev);
 	struct ally_rgb_dev *led = container_of(mc_cdev, struct ally_rgb_dev, led_rgb_dev);
 
-	/*
-	 * Scale subled intensity by master brightness to provide fine-tuned
-	 * control in the "static" modes (Solid/ Breathe). This compensates for
-	 * the Ally's coarse 4-level hardware brightness control.
-	 */
+	/* Scale subled intensity by master brightness for static modes. */
 	led_mc_calc_color_components(mc_cdev, brightness);
 
 	scoped_guard(spinlock_irqsave, &led->lock) {
 		led->update_rgb = true;
-		/*
-		 * Animation modes take their base color from the staged 0xb3
-		 * config, so a color change must restage it. Brightness-only
-		 * changes must not: those are the 0x5d hardware level.
-		 */
+		/* Update effect flag if color changed; brightness changes affect hardware level. */
 		if (mc_cdev->subled_info[0].intensity != ally_drvdata.led_rgb_data.red ||
 		    mc_cdev->subled_info[1].intensity != ally_drvdata.led_rgb_data.green ||
 		    mc_cdev->subled_info[2].intensity != ally_drvdata.led_rgb_data.blue)
@@ -3671,7 +3650,7 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 	mc_led_info = led_rgb->led_rgb_dev.subled_info;
 
 	if (ally_drvdata.led_rgb_data.initialized) {
-		/* The MCU rebooted: force every report out again */
+		/* MCU rebooted; reset last_hw_level and schedule full update. */
 		led_rgb->last_hw_level = -1;
 		scoped_guard(spinlock_irqsave, &led_rgb->lock) {
 			led_rgb->update_rgb = true;
