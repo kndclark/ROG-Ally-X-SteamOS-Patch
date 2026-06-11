@@ -89,12 +89,20 @@ else
     fi
 fi
 
-# --- 3. System Sync ---
+# --- 3. Remove Blacklist ---
+
+BLACKLIST_FILE="/etc/modprobe.d/hid-asus-ally-blacklist.conf"
+if [ -f "$BLACKLIST_FILE" ]; then
+    log "Removing modprobe blacklist for hid_asus_ally..."
+    rm -f "$BLACKLIST_FILE"
+fi
+
+# --- 4. System Sync ---
 
 log "Updating dependency map..."
 depmod -a
 
-log "Reloading module..."
+log "Reloading stock module..."
 if lsmod | grep -q "${MODULE_NAME//-/_}"; then
     modprobe -r "${MODULE_NAME//-/_}"
 fi

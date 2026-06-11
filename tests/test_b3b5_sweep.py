@@ -6,7 +6,7 @@ seconds with B4 (APPLY / NV commit) deliberately withheld.
 
   A (historical): B3+B5+B4 @ ~30 Hz -> corrupted in ~30 s
   B (proven):     5A D1 08 direct   -> 6788 frames, clean
-  C (this test):  B3+B5 only        -> ?
+  C (this test):  B3+B5 only        -> 6,212 frames, clean
 
 Clean run = B4 alone is the corruption trigger and the driver's animation
 path (B3+B5 on effect/color changes) is safe. Corruption = B5 also touches
