@@ -38,6 +38,7 @@
 #include <linux/sysfs.h>
 #include <linux/leds.h>
 #include <linux/led-class-multicolor.h>
+#include <linux/math64.h>
 
 #include "hid-ids.h"
 
@@ -379,6 +380,10 @@ struct ally_config {
 	u8 vibration_intensity_right;
 	bool vibration_active;
 
+	/* Vibration response curve LUT (rational curve from PR #4) */
+	u8 vibration_lut[2][128];
+	u8 vibration_min;	/* floor: minimum feelable vibration (0-100) */
+	int vibration_curve;	/* curve shape parameter (-100 to 500) */
 	struct ally_turbo_config turbo;
 	struct ally_btn_sysfs_entry *button_entries;
 	void *button_mappings; /* ally_button_mapping array indexed by gamepad_mode */
@@ -406,6 +411,13 @@ struct ally_handheld {
 	/* Ally joystick ring RGB control */
 	struct ally_rgb_dev *led_rgb_dev;
 	struct ally_rgb_data led_rgb_data;
+
+	/* Force feedback (rumble) */
+	struct ff_report *ff_packet;
+	struct work_struct output_worker;
+	bool output_worker_initialized;
+	spinlock_t ff_lock;
+	bool update_ff;
 };
 
 struct asus_drvdata {
@@ -510,6 +522,22 @@ enum ally_command_codes {
 	CMD_SET_ANTI_DEADZONE           = 0x18,
 };
 
+/* Rumble packet structure */
+struct ff_data {
+	u8 enable;
+	u8 magnitude_left;
+	u8 magnitude_right;
+	u8 magnitude_strong;
+	u8 magnitude_weak;
+	u8 pulse_sustain_10ms;
+	u8 pulse_release_10ms;
+	u8 loop_count;
+} __packed;
+
+struct ff_report {
+	u8 report_id;
+	struct ff_data ff;
+} __packed;
 enum ally_gamepad_mode {
 	ALLY_GAMEPAD_MODE_GAMEPAD = 0x01,
 	ALLY_GAMEPAD_MODE_KEYBOARD = 0x02,
@@ -986,10 +1014,62 @@ static int ally_set_default_gamepad_mode(struct hid_device *hdev, struct ally_ha
  *
  * Returns 0 on success, negative error code on failure
  */
+/**
+ * _ally_update_vibe_luts() - Rebuild the vibration response curve lookup tables
+ * @cfg: Ally config containing vibration parameters
+ *
+ * Uses a rational curve: y = floor + (intensity - floor) * (i * (100 + k)) / (127 * 100 + k * i)
+ * to preserve subtle haptics while capping motor intensity.
+ * The LUT is indexed by (magnitude >> 9) in the FF play_effect callback.
+ */
+static void _ally_update_vibe_luts(struct ally_config *cfg)
+{
+	int i, side;
+	u32 intensity, floor_val, numer, denom, val;
+	int k;
+	u8 intensities[2];
+
+	intensities[0] = cfg->vibration_intensity_left;
+	intensities[1] = cfg->vibration_intensity_right;
+
+	for (side = 0; side < 2; side++) {
+		intensity = (intensities[side] * 127) / 100;
+		floor_val = (cfg->vibration_min * 127) / 100;
+		k = cfg->vibration_curve;
+
+		for (i = 0; i < 128; i++) {
+			if (i == 0) {
+				cfg->vibration_lut[side][i] = 0;
+				continue;
+			}
+			/* If intensity is lower than floor, cap at intensity */
+			if (intensity <= floor_val) {
+				cfg->vibration_lut[side][i] = intensity;
+				continue;
+			}
+
+			/*
+			 * Rational Curve:
+			 * y = floor + (intensity - floor) * (i * (100 + k)) / (127 * 100 + k * i)
+			 * Use u64 intermediate to prevent overflow.
+			 */
+			numer = i * (100 + k);
+			denom = (127 * 100) + (k * i);
+			if (denom == 0)
+				val = floor_val + (intensity - floor_val);
+			else
+				val = floor_val + (u32)div_u64(
+					(u64)(intensity - floor_val) * numer, denom);
+			cfg->vibration_lut[side][i] = (u8)clamp_val(val, 0, 127);
+		}
+	}
+}
+
 static int ally_set_vibration_intensity(struct hid_device *hdev, struct ally_config *cfg,
 					u8 left, u8 right)
 {
-	u8 payload[] = { left, right };
+	/* Lock hardware gain at 100%; all scaling via software LUT */
+	u8 payload[] = { 100, 100 };
 	int ret;
 
 	u8 *buf __free(kfree) = ally_alloc_cmd(CMD_SET_VIBRATION_INTENSITY, payload, sizeof(payload));
@@ -1046,6 +1126,7 @@ static ssize_t vibration_intensity_left_store(struct device *dev, struct device_
 
 	scoped_guard(mutex, &cfg->config_mutex)
 		cfg->vibration_intensity_left = value;
+	_ally_update_vibe_luts(cfg);
 
 	return count;
 }
@@ -1093,11 +1174,104 @@ static ssize_t vibration_intensity_right_store(struct device *dev, struct device
 
 	scoped_guard(mutex, &cfg->config_mutex)
 		cfg->vibration_intensity_right = value;
+	_ally_update_vibe_luts(cfg);
 
 	return count;
 }
 
 static DEVICE_ATTR_RW(vibration_intensity_right);
+
+static ssize_t vibration_floor_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct hid_device *hdev = to_hid_device(dev);
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	struct ally_handheld *ally = drvdata->rog_ally;
+
+	if (!ally || !ally->config)
+		return -ENODEV;
+
+	return sprintf(buf, "%u\n", ally->config->vibration_min);
+}
+
+static ssize_t vibration_floor_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct hid_device *hdev = to_hid_device(dev);
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	struct ally_handheld *ally = drvdata->rog_ally;
+	struct ally_config *cfg;
+	int ret, val;
+
+	if (!ally || !ally->config)
+		return -ENODEV;
+
+	cfg = ally->config;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < 0 || val > 100)
+		return -EINVAL;
+
+	/* Clamp floor to max of current intensities */
+	if (val > max(cfg->vibration_intensity_left, cfg->vibration_intensity_right))
+		val = max(cfg->vibration_intensity_left, cfg->vibration_intensity_right);
+
+	scoped_guard(mutex, &cfg->config_mutex)
+		cfg->vibration_min = val;
+	_ally_update_vibe_luts(cfg);
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(vibration_floor);
+
+static ssize_t vibration_curve_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct hid_device *hdev = to_hid_device(dev);
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	struct ally_handheld *ally = drvdata->rog_ally;
+
+	if (!ally || !ally->config)
+		return -ENODEV;
+
+	return sprintf(buf, "%d\n", ally->config->vibration_curve);
+}
+
+static ssize_t vibration_curve_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct hid_device *hdev = to_hid_device(dev);
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	struct ally_handheld *ally = drvdata->rog_ally;
+	struct ally_config *cfg;
+	int ret, val;
+
+	if (!ally || !ally->config)
+		return -ENODEV;
+
+	cfg = ally->config;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < -100 || val > 500)
+		return -EINVAL;
+
+	scoped_guard(mutex, &cfg->config_mutex)
+		cfg->vibration_curve = val;
+	_ally_update_vibe_luts(cfg);
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(vibration_curve);
 
 /**
  * ally_set_joystick_thresholds() - Generic function to set joystick ranges
@@ -1973,6 +2147,8 @@ static struct attribute *ally_config_attrs[] = {
 	&dev_attr_xbox_controller.attr,
 	&dev_attr_vibration_intensity_left.attr,
 	&dev_attr_vibration_intensity_right.attr,
+	&dev_attr_vibration_floor.attr,
+	&dev_attr_vibration_curve.attr,
 	&dev_attr_gamepad_mode.attr,
 	&dev_attr_gamepad_modes_available.attr,
 	NULL
@@ -3115,9 +3291,31 @@ static struct ally_config *ally_config_create(struct hid_device *hdev, struct al
 	cfg->left_outer_threshold = 90;
 	cfg->right_deadzone = 10;
 	cfg->right_outer_threshold = 90;
-	cfg->vibration_intensity_left = 100;
-	cfg->vibration_intensity_right = 100;
+	cfg->vibration_intensity_left = 8;
+	cfg->vibration_intensity_right = 8;
+	cfg->vibration_min = 8;
+	cfg->vibration_curve = 400;
 	cfg->vibration_active = false;
+	_ally_update_vibe_luts(cfg);
+
+	/* Initialize default response curve values (linear) */
+	cfg->left_curve.entry_1.move = 0;
+	cfg->left_curve.entry_1.resp = 0;
+	cfg->left_curve.entry_2.move = 33;
+	cfg->left_curve.entry_2.resp = 33;
+	cfg->left_curve.entry_3.move = 66;
+	cfg->left_curve.entry_3.resp = 66;
+	cfg->left_curve.entry_4.move = 100;
+	cfg->left_curve.entry_4.resp = 100;
+
+	cfg->right_curve.entry_1.move = 0;
+	cfg->right_curve.entry_1.resp = 0;
+	cfg->right_curve.entry_2.move = 33;
+	cfg->right_curve.entry_2.resp = 33;
+	cfg->right_curve.entry_3.move = 66;
+	cfg->right_curve.entry_3.resp = 66;
+	cfg->right_curve.entry_4.move = 100;
+	cfg->right_curve.entry_4.resp = 100;
 
 	/* Initialize default response curve values (linear) */
 	cfg->left_curve.entry_1.move = 0;
@@ -3302,6 +3500,56 @@ static struct input_dev *ally_x_alloc_input_dev(struct hid_device *hdev,
 	return input_dev;
 }
 
+static int ally_x_play_effect(struct input_dev *idev, void *data, struct ff_effect *effect)
+{
+	struct ally_handheld *ally = data;
+	unsigned long flags;
+
+	if (effect->type != FF_RUMBLE)
+		return 0;
+
+	spin_lock_irqsave(&ally->ff_lock, flags);
+	if (ally->config) {
+		ally->ff_packet->ff.magnitude_strong =
+			ally->config->vibration_lut[0][effect->u.rumble.strong_magnitude >> 9];
+		ally->ff_packet->ff.magnitude_weak =
+			ally->config->vibration_lut[1][effect->u.rumble.weak_magnitude >> 9];
+	} else {
+		ally->ff_packet->ff.magnitude_strong = effect->u.rumble.strong_magnitude / 512;
+		ally->ff_packet->ff.magnitude_weak = effect->u.rumble.weak_magnitude / 512;
+	}
+	ally->update_ff = true;
+	spin_unlock_irqrestore(&ally->ff_lock, flags);
+
+	if (ally->output_worker_initialized)
+		schedule_work(&ally->output_worker);
+
+	return 0;
+}
+
+static void ally_x_work(struct work_struct *work)
+{
+	struct ally_handheld *ally = container_of(work, struct ally_handheld, output_worker);
+	struct ff_report *ff_report = NULL;
+	bool update_ff = false;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ally->ff_lock, flags);
+	update_ff = ally->update_ff;
+	if (ally->update_ff) {
+		ff_report = kmemdup(ally->ff_packet, sizeof(*ally->ff_packet), GFP_KERNEL);
+		ally->update_ff = false;
+	}
+	spin_unlock_irqrestore(&ally->ff_lock, flags);
+
+	if (update_ff && ff_report) {
+		ff_report->ff.magnitude_left = ff_report->ff.magnitude_strong;
+		ff_report->ff.magnitude_right = ff_report->ff.magnitude_weak;
+		ally_dev_set_report(ally->ally_x_hdev, (u8 *)ff_report, sizeof(*ff_report));
+	}
+	kfree(ff_report);
+}
+
 static int ally_x_setup_input(struct hid_device *hdev, struct ally_handheld *ally)
 {
 	struct input_dev *input = ally_x_alloc_input_dev(hdev, NULL);
@@ -3336,6 +3584,9 @@ static int ally_x_setup_input(struct hid_device *hdev, struct ally_handheld *all
 	input_set_capability(input, EV_KEY, KEY_F18);
 	input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY);
 	input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY1);
+
+	input_set_capability(input, EV_FF, FF_RUMBLE);
+	input_ff_create_memless(input, ally, ally_x_play_effect);
 
 	ret = input_register_device(input);
 	if (ret) {
@@ -4012,6 +4263,21 @@ static struct ally_handheld *hid_asus_ally_probe(struct hid_device *hdev)
 			break;
 		case HID_ALLY_X_INTF_IN:
 			ally_drvdata.ally_x_hdev = hdev;
+
+			/* Setup force feedback worker and packet */
+			INIT_WORK(&ally_drvdata.output_worker, ally_x_work);
+			spin_lock_init(&ally_drvdata.ff_lock);
+			ally_drvdata.output_worker_initialized = true;
+
+			ally_drvdata.ff_packet = devm_kzalloc(&hdev->dev, sizeof(*ally_drvdata.ff_packet), GFP_KERNEL);
+			if (ally_drvdata.ff_packet) {
+				ally_drvdata.ff_packet->report_id = 0x0D;
+				ally_drvdata.ff_packet->ff.enable = 0x0F;
+				ally_drvdata.ff_packet->ff.pulse_sustain_10ms = 0xFF;
+				ally_drvdata.ff_packet->ff.pulse_release_10ms = 0x00;
+				ally_drvdata.ff_packet->ff.loop_count = 0xEB;
+			}
+
 			/* This will create and populate ally_x_input */
 			ret = ally_x_setup_input(hdev, &ally_drvdata);
 			if (ret) {
@@ -4041,6 +4307,13 @@ static void hid_asus_ally_remove(struct hid_device *hdev, struct ally_handheld *
 
 	scoped_guard(mutex, &ally_data_mutex) {
 		if (ally->ally_x_hdev == hdev) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&ally->ff_lock, flags);
+			ally->output_worker_initialized = false;
+			spin_unlock_irqrestore(&ally->ff_lock, flags);
+			cancel_work_sync(&ally->output_worker);
+
 			ally->ally_x_input = NULL;
 			ally->ally_x_hdev = NULL;
 		}
