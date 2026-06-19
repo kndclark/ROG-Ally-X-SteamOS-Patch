@@ -544,6 +544,13 @@ static const char *const gamepad_mode_names[] = {
 	[ALLY_GAMEPAD_MODE_KEYBOARD] = "keyboard"
 };
 
+/*
+ * XInput rumble magnitudes (report 0x0d, bytes 4-5) use the hardware's
+ * 0..100 (0x64) intensity range, matching the Windows XInput capture.
+ * The 16-bit evdev magnitude is scaled into this range in ally_x_play_effect().
+ */
+#define ALLY_FF_MAX_INTENSITY 100
+
 static const u8 ALLY_FORCE_FEEDBACK_OFF[] = {
 	0x0D, 0x0F, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEB
 };
@@ -3342,9 +3349,9 @@ static int ally_x_play_effect(struct input_dev *idev, void *data,
 
 	scoped_guard(spinlock_irqsave, &ally->ff_lock) {
 		ally->ff_packet.ff.magnitude_strong =
-			effect->u.rumble.strong_magnitude >> 9;
+			effect->u.rumble.strong_magnitude * ALLY_FF_MAX_INTENSITY / 65535;
 		ally->ff_packet.ff.magnitude_weak =
-			effect->u.rumble.weak_magnitude >> 9;
+			effect->u.rumble.weak_magnitude * ALLY_FF_MAX_INTENSITY / 65535;
 		ally->update_ff = true;
 	}
 
