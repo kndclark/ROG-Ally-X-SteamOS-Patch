@@ -176,7 +176,14 @@ cp -f "$STUB_ZST" "${INSTALL_PATH}/${STUB_ZST}"
 log "Updating dependency map..."
 depmod -a
 
-# --- 6. Reload Module ---
+# --- 6. Blacklist Stock Module ---
+
+log "Writing modprobe blacklist for stock hid_asus_ally..."
+mkdir -p /etc/modprobe.d
+echo 'blacklist hid_asus_ally' > /etc/modprobe.d/hid-asus-ally-blacklist.conf
+log "Blacklist written to /etc/modprobe.d/hid-asus-ally-blacklist.conf"
+
+# --- 7. Reload Module ---
 
 if [ "${KVER}" != "$(uname -r)" ]; then
     warn "Module was built for kernel ${KVER} but you are running $(uname -r)."

@@ -38,7 +38,6 @@
 #include <linux/sysfs.h>
 #include <linux/leds.h>
 #include <linux/led-class-multicolor.h>
-#include <linux/math64.h>
 
 #include "hid-ids.h"
 
@@ -228,10 +227,13 @@ struct ally_rgb_dev {
 	struct delayed_work work;
 	struct delayed_work resume_work;
 	bool output_worker_initialized;
-	/* protects: removed, update_rgb */
+	/* protects: removed, update_rgb, update_effect */
 	spinlock_t lock;
 	bool removed;
 	bool update_rgb;
+	bool update_effect;
+	/* Last 0x5d hardware level; -1 forces resend. */
+	int last_hw_level;
 };
 
 /*
@@ -377,10 +379,6 @@ struct ally_config {
 	u8 vibration_intensity_right;
 	bool vibration_active;
 
-	/* Vibration response curve LUT (rational curve from PR #4) */
-	u8 vibration_lut[2][128];
-	u8 vibration_min;	/* floor: minimum feelable vibration (0-100) */
-	int vibration_curve;	/* curve shape parameter (-100 to 500) */
 	struct ally_turbo_config turbo;
 	struct ally_btn_sysfs_entry *button_entries;
 	void *button_mappings; /* ally_button_mapping array indexed by gamepad_mode */
@@ -389,6 +387,23 @@ struct ally_config {
 	struct ally_joystick_resp_curve right_curve;
 };
 
+/* XInput force-feedback report (output report 0x0d, gamepad interface) */
+struct ff_data {
+	u8 enable;
+	u8 magnitude_left;
+	u8 magnitude_right;
+	u8 magnitude_strong;
+	u8 magnitude_weak;
+	u8 pulse_sustain_10ms;
+	u8 pulse_release_10ms;
+	u8 loop_count;
+} __packed;
+
+struct ff_report {
+	u8 report_id;
+	struct ff_data ff;
+} __packed;
+
 struct ally_handheld {
 	/* All read/write to IN interfaces must lock */
 	struct mutex intf_mutex;
@@ -396,6 +411,13 @@ struct ally_handheld {
 
 	struct input_dev *ally_x_input;
 	struct hid_device *ally_x_hdev;
+
+	struct ff_report ff_packet;
+	struct work_struct ff_work;
+	/* Serializes ff_packet and update_ff between play_effect and ff_work */
+	spinlock_t ff_lock;
+	bool ff_work_initialized;
+	bool update_ff;
 
 	struct hid_device *keyboard_hdev;
 	struct input_dev *keyboard_input;
@@ -408,13 +430,6 @@ struct ally_handheld {
 	/* Ally joystick ring RGB control */
 	struct ally_rgb_dev *led_rgb_dev;
 	struct ally_rgb_data led_rgb_data;
-
-	/* Force feedback (rumble) */
-	struct ff_report *ff_packet;
-	struct work_struct output_worker;
-	bool output_worker_initialized;
-	spinlock_t ff_lock;
-	bool update_ff;
 };
 
 struct asus_drvdata {
@@ -519,22 +534,6 @@ enum ally_command_codes {
 	CMD_SET_ANTI_DEADZONE           = 0x18,
 };
 
-/* Rumble packet structure */
-struct ff_data {
-	u8 enable;
-	u8 magnitude_left;
-	u8 magnitude_right;
-	u8 magnitude_strong;
-	u8 magnitude_weak;
-	u8 pulse_sustain_10ms;
-	u8 pulse_release_10ms;
-	u8 loop_count;
-} __packed;
-
-struct ff_report {
-	u8 report_id;
-	struct ff_data ff;
-} __packed;
 enum ally_gamepad_mode {
 	ALLY_GAMEPAD_MODE_GAMEPAD = 0x01,
 	ALLY_GAMEPAD_MODE_KEYBOARD = 0x02,
@@ -545,9 +544,17 @@ static const char *const gamepad_mode_names[] = {
 	[ALLY_GAMEPAD_MODE_KEYBOARD] = "keyboard"
 };
 
+/*
+ * XInput rumble magnitudes (report 0x0d, bytes 4-5) use the hardware's
+ * 0..100 (0x64) intensity range, matching the Windows XInput capture.
+ * The 16-bit evdev magnitude is scaled into this range in ally_x_play_effect().
+ */
+#define ALLY_FF_MAX_INTENSITY 100
+
 static const u8 ALLY_FORCE_FEEDBACK_OFF[] = {
 	0x0D, 0x0F, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEB
 };
+static_assert(sizeof(struct ff_report) == sizeof(ALLY_FORCE_FEEDBACK_OFF));
 
 /* Changes to ally_drvdata must lock */
 static DEFINE_MUTEX(ally_data_mutex);
@@ -689,7 +696,6 @@ static int ally_gamepad_send_packet(struct ally_handheld *ally,
 			     struct hid_device *hdev, const u8 *buf, size_t len)
 {
 	scoped_guard(mutex, &ally->intf_mutex) {
-		print_hex_dump(KERN_INFO, "ALLY_DRV_RAW: ", DUMP_PREFIX_OFFSET, 16, 1, buf, len, false);
 		return ally_dev_set_report(hdev, buf, len);
 	}
 	return -ENODEV;
@@ -711,7 +717,6 @@ static int ally_gamepad_send_receive_packet(struct ally_handheld *ally,
 	int ret;
 
 	scoped_guard(mutex, &ally->intf_mutex) {
-		print_hex_dump(KERN_INFO, "ALLY_DRV_RAW: ", DUMP_PREFIX_OFFSET, 16, 1, buf, len, false);
 		ret = ally_dev_set_report(hdev, buf, len);
 		if (ret >= 0) {
 			memset(buf, 0, len);
@@ -1013,62 +1018,10 @@ static int ally_set_default_gamepad_mode(struct hid_device *hdev, struct ally_ha
  *
  * Returns 0 on success, negative error code on failure
  */
-/**
- * _ally_update_vibe_luts() - Rebuild the vibration response curve lookup tables
- * @cfg: Ally config containing vibration parameters
- *
- * Uses a rational curve: y = floor + (intensity - floor) * (i * (100 + k)) / (127 * 100 + k * i)
- * to preserve subtle haptics while capping motor intensity.
- * The LUT is indexed by (magnitude >> 9) in the FF play_effect callback.
- */
-static void _ally_update_vibe_luts(struct ally_config *cfg)
-{
-	int i, side;
-	u32 intensity, floor_val, numer, denom, val;
-	int k;
-	u8 intensities[2];
-
-	intensities[0] = cfg->vibration_intensity_left;
-	intensities[1] = cfg->vibration_intensity_right;
-
-	for (side = 0; side < 2; side++) {
-		intensity = (intensities[side] * 127) / 100;
-		floor_val = (cfg->vibration_min * 127) / 100;
-		k = cfg->vibration_curve;
-
-		for (i = 0; i < 128; i++) {
-			if (i == 0) {
-				cfg->vibration_lut[side][i] = 0;
-				continue;
-			}
-			/* If intensity is lower than floor, cap at intensity */
-			if (intensity <= floor_val) {
-				cfg->vibration_lut[side][i] = intensity;
-				continue;
-			}
-
-			/*
-			 * Rational Curve:
-			 * y = floor + (intensity - floor) * (i * (100 + k)) / (127 * 100 + k * i)
-			 * Use u64 intermediate to prevent overflow.
-			 */
-			numer = i * (100 + k);
-			denom = (127 * 100) + (k * i);
-			if (denom == 0)
-				val = floor_val + (intensity - floor_val);
-			else
-				val = floor_val + (u32)div_u64(
-					(u64)(intensity - floor_val) * numer, denom);
-			cfg->vibration_lut[side][i] = (u8)clamp_val(val, 0, 127);
-		}
-	}
-}
-
 static int ally_set_vibration_intensity(struct hid_device *hdev, struct ally_config *cfg,
 					u8 left, u8 right)
 {
-	/* Lock hardware gain at 100%; all scaling via software LUT */
-	u8 payload[] = { 100, 100 };
+	u8 payload[] = { left, right };
 	int ret;
 
 	u8 *buf __free(kfree) = ally_alloc_cmd(CMD_SET_VIBRATION_INTENSITY, payload, sizeof(payload));
@@ -1125,7 +1078,6 @@ static ssize_t vibration_intensity_left_store(struct device *dev, struct device_
 
 	scoped_guard(mutex, &cfg->config_mutex)
 		cfg->vibration_intensity_left = value;
-	_ally_update_vibe_luts(cfg);
 
 	return count;
 }
@@ -1173,104 +1125,11 @@ static ssize_t vibration_intensity_right_store(struct device *dev, struct device
 
 	scoped_guard(mutex, &cfg->config_mutex)
 		cfg->vibration_intensity_right = value;
-	_ally_update_vibe_luts(cfg);
 
 	return count;
 }
 
 static DEVICE_ATTR_RW(vibration_intensity_right);
-
-static ssize_t vibration_floor_show(struct device *dev,
-				    struct device_attribute *attr, char *buf)
-{
-	struct hid_device *hdev = to_hid_device(dev);
-	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
-	struct ally_handheld *ally = drvdata->rog_ally;
-
-	if (!ally || !ally->config)
-		return -ENODEV;
-
-	return sprintf(buf, "%u\n", ally->config->vibration_min);
-}
-
-static ssize_t vibration_floor_store(struct device *dev,
-				     struct device_attribute *attr,
-				     const char *buf, size_t count)
-{
-	struct hid_device *hdev = to_hid_device(dev);
-	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
-	struct ally_handheld *ally = drvdata->rog_ally;
-	struct ally_config *cfg;
-	int ret, val;
-
-	if (!ally || !ally->config)
-		return -ENODEV;
-
-	cfg = ally->config;
-
-	ret = kstrtoint(buf, 0, &val);
-	if (ret)
-		return ret;
-
-	if (val < 0 || val > 100)
-		return -EINVAL;
-
-	/* Clamp floor to max of current intensities */
-	if (val > max(cfg->vibration_intensity_left, cfg->vibration_intensity_right))
-		val = max(cfg->vibration_intensity_left, cfg->vibration_intensity_right);
-
-	scoped_guard(mutex, &cfg->config_mutex)
-		cfg->vibration_min = val;
-	_ally_update_vibe_luts(cfg);
-
-	return count;
-}
-
-static DEVICE_ATTR_RW(vibration_floor);
-
-static ssize_t vibration_curve_show(struct device *dev,
-				    struct device_attribute *attr, char *buf)
-{
-	struct hid_device *hdev = to_hid_device(dev);
-	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
-	struct ally_handheld *ally = drvdata->rog_ally;
-
-	if (!ally || !ally->config)
-		return -ENODEV;
-
-	return sprintf(buf, "%d\n", ally->config->vibration_curve);
-}
-
-static ssize_t vibration_curve_store(struct device *dev,
-				     struct device_attribute *attr,
-				     const char *buf, size_t count)
-{
-	struct hid_device *hdev = to_hid_device(dev);
-	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
-	struct ally_handheld *ally = drvdata->rog_ally;
-	struct ally_config *cfg;
-	int ret, val;
-
-	if (!ally || !ally->config)
-		return -ENODEV;
-
-	cfg = ally->config;
-
-	ret = kstrtoint(buf, 0, &val);
-	if (ret)
-		return ret;
-
-	if (val < -100 || val > 500)
-		return -EINVAL;
-
-	scoped_guard(mutex, &cfg->config_mutex)
-		cfg->vibration_curve = val;
-	_ally_update_vibe_luts(cfg);
-
-	return count;
-}
-
-static DEVICE_ATTR_RW(vibration_curve);
 
 /**
  * ally_set_joystick_thresholds() - Generic function to set joystick ranges
@@ -2146,8 +2005,6 @@ static struct attribute *ally_config_attrs[] = {
 	&dev_attr_xbox_controller.attr,
 	&dev_attr_vibration_intensity_left.attr,
 	&dev_attr_vibration_intensity_right.attr,
-	&dev_attr_vibration_floor.attr,
-	&dev_attr_vibration_curve.attr,
 	&dev_attr_gamepad_mode.attr,
 	&dev_attr_gamepad_modes_available.attr,
 	NULL
@@ -3290,31 +3147,9 @@ static struct ally_config *ally_config_create(struct hid_device *hdev, struct al
 	cfg->left_outer_threshold = 90;
 	cfg->right_deadzone = 10;
 	cfg->right_outer_threshold = 90;
-	cfg->vibration_intensity_left = 8;
-	cfg->vibration_intensity_right = 8;
-	cfg->vibration_min = 8;
-	cfg->vibration_curve = 400;
+	cfg->vibration_intensity_left = 100;
+	cfg->vibration_intensity_right = 100;
 	cfg->vibration_active = false;
-	_ally_update_vibe_luts(cfg);
-
-	/* Initialize default response curve values (linear) */
-	cfg->left_curve.entry_1.move = 0;
-	cfg->left_curve.entry_1.resp = 0;
-	cfg->left_curve.entry_2.move = 33;
-	cfg->left_curve.entry_2.resp = 33;
-	cfg->left_curve.entry_3.move = 66;
-	cfg->left_curve.entry_3.resp = 66;
-	cfg->left_curve.entry_4.move = 100;
-	cfg->left_curve.entry_4.resp = 100;
-
-	cfg->right_curve.entry_1.move = 0;
-	cfg->right_curve.entry_1.resp = 0;
-	cfg->right_curve.entry_2.move = 33;
-	cfg->right_curve.entry_2.resp = 33;
-	cfg->right_curve.entry_3.move = 66;
-	cfg->right_curve.entry_3.resp = 66;
-	cfg->right_curve.entry_4.move = 100;
-	cfg->right_curve.entry_4.resp = 100;
 
 	/* Initialize default response curve values (linear) */
 	cfg->left_curve.entry_1.move = 0;
@@ -3479,6 +3314,53 @@ static bool ally_x_raw_event(struct input_dev *input, struct hid_device *hdev,
 	return false;
 }
 
+static void ally_x_ff_work_fn(struct work_struct *work)
+{
+	struct ally_handheld *ally =
+		container_of(work, struct ally_handheld, ff_work);
+	struct ff_report report;
+	bool update = false;
+	int ret;
+
+	scoped_guard(spinlock_irqsave, &ally->ff_lock) {
+		if (ally->update_ff) {
+			report = ally->ff_packet;
+			ally->update_ff = false;
+			update = true;
+		}
+	}
+
+	if (!update || !ally->ally_x_hdev)
+		return;
+
+	ret = ally_gamepad_send_packet(ally, ally->ally_x_hdev,
+				       (u8 *)&report, sizeof(report));
+	if (ret < 0)
+		hid_err(ally->ally_x_hdev, "Failed to send force-feedback: %d\n", ret);
+}
+
+static int ally_x_play_effect(struct input_dev *idev, void *data,
+			      struct ff_effect *effect)
+{
+	struct ally_handheld *ally = &ally_drvdata;
+
+	if (effect->type != FF_RUMBLE)
+		return 0;
+
+	scoped_guard(spinlock_irqsave, &ally->ff_lock) {
+		ally->ff_packet.ff.magnitude_strong =
+			effect->u.rumble.strong_magnitude * ALLY_FF_MAX_INTENSITY / 65535;
+		ally->ff_packet.ff.magnitude_weak =
+			effect->u.rumble.weak_magnitude * ALLY_FF_MAX_INTENSITY / 65535;
+		ally->update_ff = true;
+	}
+
+	if (ally->ff_work_initialized)
+		schedule_work(&ally->ff_work);
+
+	return 0;
+}
+
 static struct input_dev *ally_x_alloc_input_dev(struct hid_device *hdev,
 						const char *name_suffix)
 {
@@ -3497,56 +3379,6 @@ static struct input_dev *ally_x_alloc_input_dev(struct hid_device *hdev,
 	input_set_drvdata(input_dev, hdev);
 
 	return input_dev;
-}
-
-static int ally_x_play_effect(struct input_dev *idev, void *data, struct ff_effect *effect)
-{
-	struct ally_handheld *ally = data;
-	unsigned long flags;
-
-	if (effect->type != FF_RUMBLE)
-		return 0;
-
-	spin_lock_irqsave(&ally->ff_lock, flags);
-	if (ally->config) {
-		ally->ff_packet->ff.magnitude_strong =
-			ally->config->vibration_lut[0][effect->u.rumble.strong_magnitude >> 9];
-		ally->ff_packet->ff.magnitude_weak =
-			ally->config->vibration_lut[1][effect->u.rumble.weak_magnitude >> 9];
-	} else {
-		ally->ff_packet->ff.magnitude_strong = effect->u.rumble.strong_magnitude / 512;
-		ally->ff_packet->ff.magnitude_weak = effect->u.rumble.weak_magnitude / 512;
-	}
-	ally->update_ff = true;
-	spin_unlock_irqrestore(&ally->ff_lock, flags);
-
-	if (ally->output_worker_initialized)
-		schedule_work(&ally->output_worker);
-
-	return 0;
-}
-
-static void ally_x_work(struct work_struct *work)
-{
-	struct ally_handheld *ally = container_of(work, struct ally_handheld, output_worker);
-	struct ff_report *ff_report = NULL;
-	bool update_ff = false;
-	unsigned long flags;
-
-	spin_lock_irqsave(&ally->ff_lock, flags);
-	update_ff = ally->update_ff;
-	if (ally->update_ff) {
-		ff_report = kmemdup(ally->ff_packet, sizeof(*ally->ff_packet), GFP_KERNEL);
-		ally->update_ff = false;
-	}
-	spin_unlock_irqrestore(&ally->ff_lock, flags);
-
-	if (update_ff && ff_report) {
-		ff_report->ff.magnitude_left = ff_report->ff.magnitude_strong;
-		ff_report->ff.magnitude_right = ff_report->ff.magnitude_weak;
-		ally_dev_set_report(ally->ally_x_hdev, (u8 *)ff_report, sizeof(*ff_report));
-	}
-	kfree(ff_report);
 }
 
 static int ally_x_setup_input(struct hid_device *hdev, struct ally_handheld *ally)
@@ -3584,8 +3416,15 @@ static int ally_x_setup_input(struct hid_device *hdev, struct ally_handheld *all
 	input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY);
 	input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY1);
 
+	memcpy(&ally->ff_packet, ALLY_FORCE_FEEDBACK_OFF, sizeof(ally->ff_packet));
+	spin_lock_init(&ally->ff_lock);
+	INIT_WORK(&ally->ff_work, ally_x_ff_work_fn);
+	ally->ff_work_initialized = true;
+
 	input_set_capability(input, EV_FF, FF_RUMBLE);
-	input_ff_create_memless(input, ally, ally_x_play_effect);
+	ret = input_ff_create_memless(input, NULL, ally_x_play_effect);
+	if (ret)
+		hid_warn(hdev, "Failed to create force-feedback: %d\n", ret);
 
 	ret = input_register_device(input);
 	if (ret) {
@@ -3673,9 +3512,11 @@ static int ally_rgb_apply_brightness(struct ally_rgb_dev *led_rgb)
 	u8 buf[] = { FEATURE_KBD_LED_REPORT_ID1, ALLY_LED_BRIGHTNESS_CMD1,
 		     ALLY_LED_BRIGHTNESS_CMD2, ALLY_LED_BRIGHTNESS_CMD3, 0x00 };
 	u8 level;
+	int ret;
 
 	if (ally_drvdata.led_rgb_data.mode == ALLY_RGB_EFFECT_STATIC) {
-		level = (br > 0 && ally_drvdata.led_rgb_data.enabled) ? 3 : 0;
+		/* Dimming in static mode uses software scaling; hardware level fixed at max. */
+		level = 3;
 	} else {
 		/* Map 0-100 to 0-3 hardware levels for animations */
 		if (br == 0 || !ally_drvdata.led_rgb_data.enabled)
@@ -3688,9 +3529,17 @@ static int ally_rgb_apply_brightness(struct ally_rgb_dev *led_rgb)
 			level = 3;
 	}
 
+	/* Send brightness report only on level changes; may be NV-backed. */
+	if (level == led_rgb->last_hw_level)
+		return 0;
+
 	buf[4] = level;
 
-	return ally_dev_set_report(led_rgb->hdev, buf, sizeof(buf));
+	ret = ally_dev_set_report(led_rgb->hdev, buf, sizeof(buf));
+	if (ret >= 0)
+		led_rgb->last_hw_level = level;
+
+	return ret;
 }
 
 static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
@@ -3703,9 +3552,17 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		.cmd = ALLY_LED_CMD_CONFIG,
 		.zone = 0x00,
 		.effect = ally_drvdata.led_rgb_data.mode,
-		.red = led_rgb->led_rgb_dev.subled_info[0].brightness,
-		.green = led_rgb->led_rgb_dev.subled_info[1].brightness,
-		.blue = led_rgb->led_rgb_dev.subled_info[2].brightness,
+		/*
+		 * Unscaled intensity, not the scaled .brightness: animation
+		 * dimming is the 4-level 0x5d hardware control, so scaled
+		 * values here would dim twice.
+		 */
+		.red = led_rgb->led_rgb_dev.subled_info[0].intensity,
+		.green = led_rgb->led_rgb_dev.subled_info[1].intensity,
+		.blue = led_rgb->led_rgb_dev.subled_info[2].intensity,
+	};
+	u8 set_buf[ROG_ALLY_REPORT_SIZE] = {
+		FEATURE_KBD_REPORT_ID, ALLY_LED_CMD_SET
 	};
 	u8 buf[ROG_ALLY_REPORT_SIZE] = {};
 	int ret;
@@ -3733,23 +3590,46 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 	if (ret < 0)
 		return ret;
 
-	/*
-	 * Commit sequence: Config (0xb3) -> Set (0xb5) -> Apply (0xb4)
-	 */
-	{
-		u8 set_buf[ROG_ALLY_REPORT_SIZE] = {
-			FEATURE_KBD_REPORT_ID, ALLY_LED_CMD_SET
-		};
-		u8 apply_buf[ROG_ALLY_REPORT_SIZE] = {
-			FEATURE_KBD_REPORT_ID, ALLY_LED_CMD_APPLY
-		};
+	/* Config (0xb3) stages; SET (0xb5) applies; APPLY (0xb4) commits to NV on suspend. */
+	return ally_dev_set_report(led_rgb->hdev, set_buf, sizeof(set_buf));
+}
 
-		ret = ally_dev_set_report(led_rgb->hdev, set_buf, sizeof(set_buf));
-		if (ret < 0)
-			return ret;
+/*
+ * Volatile per-zone color set (code page 0xd1, CMD_LED_CONTROL). This is the
+ * packet the upstream hid-asus-ally driver streams for all live updates; it
+ * bypasses the Aura effect engine and the MCU's non-volatile storage, so it
+ * is safe to send at slider rate. Zone order: left-bottom, left-top,
+ * right-bottom, right-top.
+ */
+static int ally_rgb_send_direct(struct ally_rgb_dev *led_rgb,
+				u8 red, u8 green, u8 blue)
+{
+	u8 buf[16] = { FEATURE_KBD_REPORT_ID, HID_ALLY_FEATURE_CODE_PAGE,
+		       CMD_LED_CONTROL, 0x0c };
+	int i;
 
-		return ally_dev_set_report(led_rgb->hdev, apply_buf, sizeof(apply_buf));
+	for (i = 0; i < 4; i++) {
+		buf[4 + i * 3] = red;
+		buf[5 + i * 3] = green;
+		buf[6 + i * 3] = blue;
 	}
+
+	return ally_dev_set_report(led_rgb->hdev, buf, sizeof(buf));
+}
+
+/*
+ * Persist the active LED config to MCU non-volatile storage so it is shown
+ * at power-on. Each call costs an MCU flash write cycle: call only from the
+ * suspend path (mirroring ally_pm_suspend in the upstream hid-asus-ally
+ * driver), never from the update hot path.
+ */
+static int ally_rgb_commit(struct ally_rgb_dev *led_rgb)
+{
+	u8 apply_buf[ROG_ALLY_REPORT_SIZE] = {
+		FEATURE_KBD_REPORT_ID, ALLY_LED_CMD_APPLY
+	};
+
+	return ally_dev_set_report(led_rgb->hdev, apply_buf, sizeof(apply_buf));
 }
 
 static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightness)
@@ -3757,15 +3637,16 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 	struct led_classdev_mc *mc_cdev = lcdev_to_mccdev(cdev);
 	struct ally_rgb_dev *led = container_of(mc_cdev, struct ally_rgb_dev, led_rgb_dev);
 
-	/*
-	 * Scale subled intensity by master brightness to provide fine-tuned
-	 * control in the "static" modes (Solid/ Breathe). This compensates for 
-	 * the Ally's coarse 4-level hardware brightness control.
-	 */
+	/* Scale subled intensity by master brightness for static modes. */
 	led_mc_calc_color_components(mc_cdev, brightness);
 
 	scoped_guard(spinlock_irqsave, &led->lock) {
 		led->update_rgb = true;
+		/* Update effect flag if color changed; brightness changes affect hardware level. */
+		if (mc_cdev->subled_info[0].intensity != ally_drvdata.led_rgb_data.red ||
+		    mc_cdev->subled_info[1].intensity != ally_drvdata.led_rgb_data.green ||
+		    mc_cdev->subled_info[2].intensity != ally_drvdata.led_rgb_data.blue)
+			led->update_effect = true;
 	}
 
 	ally_drvdata.led_rgb_data.red = mc_cdev->subled_info[0].intensity;
@@ -3778,21 +3659,69 @@ static void ally_rgb_set(struct led_classdev *cdev, enum led_brightness brightne
 static void ally_rgb_work_fn(struct work_struct *work)
 {
 	struct ally_rgb_dev *led = container_of(work, struct ally_rgb_dev, work.work);
+	bool update_rgb, update_effect;
 	int ret;
 
 	scoped_guard(spinlock_irqsave, &led->lock) {
-		if (!led->update_rgb)
+		if (led->removed)
 			return;
+		update_rgb = led->update_rgb;
+		update_effect = led->update_effect;
 		led->update_rgb = false;
+		led->update_effect = false;
 	}
 
-	ret = ally_rgb_apply_effect(led);
-	if (ret < 0)
-		dev_err(&led->hdev->dev, "Failed to apply RGB effect: %d\n", ret);
+	if (!update_rgb && !update_effect)
+		return;
 
 	ret = ally_rgb_apply_brightness(led);
-	if (ret < 0)
+	if (ret < 0) {
 		dev_err(&led->hdev->dev, "Failed to apply RGB brightness: %d\n", ret);
+		return;
+	}
+
+	if (ally_drvdata.led_rgb_data.mode == ALLY_RGB_EFFECT_STATIC) {
+		/*
+		 * Static colors stream on the volatile direct path. The Aura
+		 * effect engine (and its NV-backed config) is never touched
+		 * here; dimming and "off" are software RGB scaling.
+		 */
+		if (ally_drvdata.led_rgb_data.enabled)
+			ret = ally_rgb_send_direct(led,
+				led->led_rgb_dev.subled_info[0].brightness,
+				led->led_rgb_dev.subled_info[1].brightness,
+				led->led_rgb_dev.subled_info[2].brightness);
+		else
+			ret = ally_rgb_send_direct(led, 0, 0, 0);
+		if (ret < 0)
+			dev_err(&led->hdev->dev, "Failed to set direct RGB: %d\n", ret);
+	} else if (update_effect) {
+		ret = ally_rgb_apply_effect(led);
+		if (ret < 0)
+			dev_err(&led->hdev->dev, "Failed to apply RGB effect: %d\n", ret);
+	}
+}
+
+/*
+ * Route sysfs-triggered updates through the throttled worker. Sending from
+ * the store callbacks directly would bypass rate limiting and interleave
+ * with the worker's own packet sequences.
+ */
+static void ally_rgb_queue_update(bool effect_changed)
+{
+	struct ally_rgb_dev *led = ally_drvdata.led_rgb_dev;
+
+	if (!led)
+		return;
+
+	scoped_guard(spinlock_irqsave, &led->lock) {
+		if (led->removed)
+			return;
+		led->update_rgb = true;
+		if (effect_changed)
+			led->update_effect = true;
+	}
+	queue_delayed_work(system_wq, &led->work, msecs_to_jiffies(30));
 }
 
 
@@ -3810,7 +3739,13 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 	mc_led_info = led_rgb->led_rgb_dev.subled_info;
 
 	if (ally_drvdata.led_rgb_data.initialized) {
-		ally_rgb_apply_brightness(led_rgb);
+		/* MCU rebooted; reset last_hw_level and schedule full update. */
+		led_rgb->last_hw_level = -1;
+		scoped_guard(spinlock_irqsave, &led_rgb->lock) {
+			led_rgb->update_rgb = true;
+			led_rgb->update_effect = true;
+		}
+		queue_delayed_work(system_wq, &led_rgb->work, 0);
 	}
 
 	/* Force release all vendor buttons to prevent "stuck" ghosting on resume (workaround for Ally X USB re-probing during suspend/resume)*/
@@ -3876,8 +3811,7 @@ static ssize_t effect_store(struct device *dev,
 		return mode;
 
 	ally_drvdata.led_rgb_data.mode = mode;
-	if (ally_drvdata.led_rgb_dev)
-		ally_rgb_apply_effect(ally_drvdata.led_rgb_dev);
+	ally_rgb_queue_update(true);
 
 	return count;
 }
@@ -3915,8 +3849,7 @@ static ssize_t speed_store(struct device *dev,
 		return -EINVAL;
 
 	ally_drvdata.led_rgb_data.speed = speed;
-	if (ally_drvdata.led_rgb_dev)
-		ally_rgb_apply_effect(ally_drvdata.led_rgb_dev);
+	ally_rgb_queue_update(true);
 
 	return count;
 }
@@ -3963,8 +3896,7 @@ static ssize_t enabled_store(struct device *dev,
 		return ret;
 
 	ally_drvdata.led_rgb_data.enabled = enabled;
-	if (ally_drvdata.led_rgb_dev)
-		ally_rgb_apply_brightness(ally_drvdata.led_rgb_dev);
+	ally_rgb_queue_update(false);
 
 	return count;
 }
@@ -4068,6 +4000,7 @@ static struct ally_rgb_dev *ally_rgb_create(struct hid_device *hdev)
 	INIT_DELAYED_WORK(&led_rgb->work, ally_rgb_work_fn);
 	INIT_DELAYED_WORK(&led_rgb->resume_work, ally_rgb_resume_work_fn);
 	led_rgb->output_worker_initialized = true;
+	led_rgb->last_hw_level = -1;
 	spin_lock_init(&led_rgb->lock);
 
 	ret = ally_rgb_register(hdev, led_rgb);
@@ -4168,21 +4101,6 @@ static struct ally_handheld *hid_asus_ally_probe(struct hid_device *hdev)
 			break;
 		case HID_ALLY_X_INTF_IN:
 			ally_drvdata.ally_x_hdev = hdev;
-
-			/* Setup force feedback worker and packet */
-			INIT_WORK(&ally_drvdata.output_worker, ally_x_work);
-			spin_lock_init(&ally_drvdata.ff_lock);
-			ally_drvdata.output_worker_initialized = true;
-
-			ally_drvdata.ff_packet = devm_kzalloc(&hdev->dev, sizeof(*ally_drvdata.ff_packet), GFP_KERNEL);
-			if (ally_drvdata.ff_packet) {
-				ally_drvdata.ff_packet->report_id = 0x0D;
-				ally_drvdata.ff_packet->ff.enable = 0x0F;
-				ally_drvdata.ff_packet->ff.pulse_sustain_10ms = 0xFF;
-				ally_drvdata.ff_packet->ff.pulse_release_10ms = 0x00;
-				ally_drvdata.ff_packet->ff.loop_count = 0xEB;
-			}
-
 			/* This will create and populate ally_x_input */
 			ret = ally_x_setup_input(hdev, &ally_drvdata);
 			if (ret) {
@@ -4212,13 +4130,10 @@ static void hid_asus_ally_remove(struct hid_device *hdev, struct ally_handheld *
 
 	scoped_guard(mutex, &ally_data_mutex) {
 		if (ally->ally_x_hdev == hdev) {
-			unsigned long flags;
-
-			spin_lock_irqsave(&ally->ff_lock, flags);
-			ally->output_worker_initialized = false;
-			spin_unlock_irqrestore(&ally->ff_lock, flags);
-			cancel_work_sync(&ally->output_worker);
-
+			if (ally->ff_work_initialized) {
+				ally->ff_work_initialized = false;
+				cancel_work_sync(&ally->ff_work);
+			}
 			ally->ally_x_input = NULL;
 			ally->ally_x_hdev = NULL;
 		}
@@ -5261,6 +5176,29 @@ asus_resume_err:
 	return ret;
 }
 
+static int __maybe_unused asus_suspend(struct hid_device *hdev, pm_message_t message)
+{
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+
+	if (drvdata->quirks & QUIRK_ROG_ALLY_XPAD) {
+		struct ally_rgb_dev *led_rgb = ally_drvdata.led_rgb_dev;
+
+		/*
+		 * Persist the current LED config so the MCU shows it at
+		 * power-on. The 0xb4 NV commit is sent here and only here:
+		 * one flash write per suspend instead of one per slider tick.
+		 */
+		if (led_rgb && led_rgb->hdev == hdev &&
+		    ally_drvdata.led_rgb_data.initialized) {
+			cancel_delayed_work_sync(&led_rgb->work);
+			if (ally_rgb_apply_effect(led_rgb) >= 0)
+				ally_rgb_commit(led_rgb);
+		}
+	}
+
+	return 0;
+}
+
 static int __maybe_unused asus_reset_resume(struct hid_device *hdev)
 {
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
@@ -5653,6 +5591,7 @@ static struct hid_driver asus_driver = {
 	.input_configured       = asus_input_configured,
 	.reset_resume           = pm_ptr(asus_reset_resume),
 	.resume			= pm_ptr(asus_resume),
+	.suspend		= pm_ptr(asus_suspend),
 	.event			= asus_event,
 	.raw_event		= asus_raw_event
 };
