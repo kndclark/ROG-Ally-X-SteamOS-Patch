@@ -274,6 +274,9 @@ struct ally_rgb_data {
 	u8 red;
 	u8 green;
 	u8 blue;
+	u8 bg_red;
+	u8 bg_green;
+	u8 bg_blue;
 	bool enabled;
 	bool initialized;
 };
@@ -3800,6 +3803,17 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		.green = led_rgb->led_rgb_dev.subled_info[1].intensity,
 		.blue = led_rgb->led_rgb_dev.subled_info[2].intensity,
 	};
+
+	/* 
+	 * Crossfade (duality) is driven by background RGB in offsets 10-12. 
+	 * HW breathing smoothly transitions between primary and bg colors.
+	 */
+	if (ally_drvdata.led_rgb_data.mode == ALLY_RGB_EFFECT_BREATHING) {
+		rpt.bg_red = ally_drvdata.led_rgb_data.bg_red;
+		rpt.bg_green = ally_drvdata.led_rgb_data.bg_green;
+		rpt.bg_blue = ally_drvdata.led_rgb_data.bg_blue;
+	}
+
 	u8 set_buf[ROG_ALLY_REPORT_SIZE] = {
 		FEATURE_KBD_REPORT_ID, ALLY_LED_CMD_SET
 	};
@@ -4156,6 +4170,35 @@ static DEVICE_ATTR_RO(profile_range);
 static DEVICE_ATTR_RW(enabled);
 static DEVICE_ATTR_RO(enabled_index);
 
+static ssize_t color2_show(struct device *dev,
+			   struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d %d %d\n",
+			  ally_drvdata.led_rgb_data.bg_red,
+			  ally_drvdata.led_rgb_data.bg_green,
+			  ally_drvdata.led_rgb_data.bg_blue);
+}
+
+static ssize_t color2_store(struct device *dev,
+			    struct device_attribute *attr,
+			    const char *buf, size_t count)
+{
+	int r, g, b;
+
+	if (sscanf(buf, "%d %d %d", &r, &g, &b) != 3)
+		return -EINVAL;
+
+	/* Clamp values */
+	ally_drvdata.led_rgb_data.bg_red = clamp_val(r, 0, 255);
+	ally_drvdata.led_rgb_data.bg_green = clamp_val(g, 0, 255);
+	ally_drvdata.led_rgb_data.bg_blue = clamp_val(b, 0, 255);
+
+	ally_rgb_queue_update(true);
+
+	return count;
+}
+static DEVICE_ATTR_RW(color2);
+
 static struct attribute *ally_rgb_attrs[] = {
 	&dev_attr_effect.attr,
 	&dev_attr_effect_index.attr,
@@ -4165,6 +4208,7 @@ static struct attribute *ally_rgb_attrs[] = {
 	&dev_attr_profile_range.attr,
 	&dev_attr_enabled.attr,
 	&dev_attr_enabled_index.attr,
+	&dev_attr_color2.attr,
 	NULL,
 };
 
