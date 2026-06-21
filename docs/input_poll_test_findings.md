@@ -104,12 +104,14 @@ interface.
 **Quick verification on a live system:**
 ```bash
 # Confirm which interface owns which endpoint:
-ls /sys/bus/usb/devices/1-2:1.0/ep_85/   # exists (feature-only node)
-ls /sys/bus/usb/devices/1-2:1.2/ep_83/   # exists (N-KEY + LED node)
-ls /sys/bus/usb/devices/1-2:1.0/ep_83/   # does not exist
+ls -d /sys/bus/usb/devices/1-2:1.0/ep_85/   # exists (feature-only node)
+ls -d /sys/bus/usb/devices/1-2:1.2/ep_83/   # exists (N-KEY + LED node)
+ls -d /sys/bus/usb/devices/1-2:1.0/ep_83/   # (Expected to fail with 'No such file or directory')
 
 # Confirm the LED classdev is parented to 1-2:1.2:
-readlink -f /sys/class/leds/ally\:rgb\:joystick_rings/device
+# (Note: the driver currently uses the Legion Go S name for SteamOS compatibility)
+# readlink -f /sys/class/leds/ally\:rgb\:joystick_rings/device
+readlink -f /sys/class/leds/go_s\:rgb\:joystick_rings/device
 # → .../1-2:1.2/...
 ```
 
