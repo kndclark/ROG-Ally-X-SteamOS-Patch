@@ -12,9 +12,9 @@ import re
 import sys
 
 
-def analyze(path, ep="7", anomaly_ms=3.0):
-    # line: <tag> <ts_us> C Ii:1:005:<ep> <status>:<interval> <len> = <data>
-    pat = re.compile(rf'\s(\d+)\s+C\s+\S+:005:{ep}\s+(-?\d+):\d+\s+(\d+)')
+def analyze(path, ep="7", dev="005", anomaly_ms=3.0):
+    # line: <tag> <ts_us> C Ii:1:<dev>:<ep> <status>:<interval> <len> = <data>
+    pat = re.compile(rf'\s(\d+)\s+C\s+\S+:{dev}:{ep}\s+(-?\d+):\d+\s+(\d+)')
     prev = None
     count = 0
     first = last = None
@@ -39,15 +39,24 @@ def analyze(path, ep="7", anomaly_ms=3.0):
         print(f"{path}: only {count} data completions on ep{ep} - insufficient (did the stick move?)")
         return
     span = (last - first) / 1e6
+    fast = [g for g in gaps if g < 1.8]              # normal ~1ms cadence
+    missed = [g for g in gaps if 1.8 <= g < 8.0]     # 1-7 dropped frames = drop signature
+    pause = [g for g in gaps if g >= 8.0]            # movement pauses (excluded from drop-rate)
+    active = len(fast) + len(missed)
+    drop_rate = (len(missed) / active * 100) if active else 0.0
     anomalies = sorted((g for g in gaps if g > anomaly_ms), reverse=True)
     print(f"{path}")
     print(f"  delivered pad frames on ep{ep}: {count}  over {span:.1f}s  (~{count/span:.0f}/s)")
     print(f"  inter-frame gap ms: mean={sum(gaps)/len(gaps):.2f}  max={max(gaps):.2f}")
+    print(f"  buckets: normal<1.8ms={len(fast)}  missed 1.8-8ms={len(missed)}  pause>8ms={len(pause)}")
+    print(f"  active drop-rate (missed/(normal+missed)) = {drop_rate:.2f}%")
     print(f"  anomalous gaps > {anomaly_ms}ms (candidate drops): {len(anomalies)}"
           + (f"  largest: {[round(g, 1) for g in anomalies[:12]]}" if anomalies else ""))
 
 
 if __name__ == "__main__":
-    analyze(sys.argv[1] if len(sys.argv) > 1 else "/tmp/usbmon_stick.txt",
-            ep=sys.argv[2] if len(sys.argv) > 2 else "7",
-            anomaly_ms=float(sys.argv[3]) if len(sys.argv) > 3 else 3.0)
+    a = sys.argv
+    analyze(a[1] if len(a) > 1 else "/tmp/usbmon_stick.txt",
+            ep=a[2] if len(a) > 2 else "7",
+            dev=a[3] if len(a) > 3 else "005",
+            anomaly_ms=float(a[4]) if len(a) > 4 else 3.0)
