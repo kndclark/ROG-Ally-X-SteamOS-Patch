@@ -3754,7 +3754,20 @@ static void ally_rgb_queue_update(bool effect_changed)
 	queue_delayed_work(system_wq, &led->work, msecs_to_jiffies(30));
 }
 
+static int ally_rgb_aura_init(struct ally_rgb_dev *led_rgb)
+{
+	u8 buf[ROG_ALLY_REPORT_SIZE] = { 0x5a, 0xc0, 0x00, 0x01 };
+	int ret;
 
+	if (!led_rgb || !led_rgb->hdev)
+		return -ENODEV;
+
+	ret = ally_dev_set_report(led_rgb->hdev, buf, sizeof(buf));
+	if (ret < 0)
+		hid_err(led_rgb->hdev, "Failed to send Aura init: %d\n", ret);
+
+	return ret;
+}
 
 static void ally_rgb_resume_work_fn(struct work_struct *work)
 {
@@ -3769,6 +3782,9 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 	mc_led_info = led_rgb->led_rgb_dev.subled_info;
 
 	if (ally_drvdata.led_rgb_data.initialized) {
+		/* Send Aura init packet to prevent MCU hangs */
+		ally_rgb_aura_init(led_rgb);
+
 		/* MCU rebooted; reset last_hw_level and schedule full update. */
 		led_rgb->last_hw_level = -1;
 		scoped_guard(spinlock_irqsave, &led_rgb->lock) {
@@ -4108,6 +4124,9 @@ static struct ally_rgb_dev *ally_rgb_create(struct hid_device *hdev)
 		ally_drvdata.led_rgb_data.enabled = true;
 		ally_drvdata.led_rgb_data.direction = 1;
 	}
+
+	/* Send Aura init packet to prevent MCU hangs */
+	ally_rgb_aura_init(led_rgb);
 
 	ally_rgb_apply_brightness(led_rgb);
 
