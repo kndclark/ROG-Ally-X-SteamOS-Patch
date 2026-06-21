@@ -42,7 +42,7 @@ report descriptor for Input/Output/Feature *main items*, and reading the endpoin
 |--------|-----------|-------------|-----------------|-----------|------|
 | **hidraw1** | 1-2:1.0 | **0 / 0 / 13** | **ep5** (`ep_85`) | **1 ms** | **feature-only → PR62 target** |
 | hidraw2 | 1-2:1.1 | 2 / 0 / 0 | ep2 (`ep_82`) | 4 ms | (no observed input from tested buttons) |
-| hidraw3 | 1-2:1.2 | 4 / 1 / 3 | ep3 (`ep_83`) | 1 ms | N-KEY vendor (`0x5a`); M1/M2 paddles report here |
+| hidraw3 | 1-2:1.2 | 4 / 1 / 3 | ep3 (`ep_83`) | 1 ms | N-KEY vendor (`0x5a`); M1/M2 paddles report here; **RGB/LED registered here** (see §1.1) |
 | hidraw4 | 1-2:1.3 | 4 / 2 / 0 | ep1 (`ep_81`) | 1 ms | standard HID keyboard (paddles in distinct-key mode) |
 | hidraw5 | 1-2:1.4 | 2 / 2 / 1 | ep6 (`ep_86`) | 4 ms | — |
 | **hidraw7** | 1-2:1.5 | **10 / 6 / 0** | **ep7** (`ep_87`) | **1 ms** | **gamepad (analog sticks/buttons)** |
@@ -53,6 +53,65 @@ device's firmware:
 - `hidraw0` "ROG Ally X Controller" — a **Valve `uhid` virtual device** (`28DE:12FD` = Steam Input),
   i.e. the *processed* controller Steam presents, not the physical pad.
 - `hidraw6` `NVTK0603` — the Novatek touchscreen (`hid-multitouch`), a separate device.
+
+### 1.1 Why RGB/LED is on `1-2:1.2`, not on the feature-only `1-2:1.0` (hidraw1)
+
+On the ASUS *laptops* where PR62 was originally motivated, the feature-only interface and the RGB
+interface are reportedly the **same** HID node — so stopping its poll could theoretically affect LED
+writes. On this Ally X they are **different** interfaces. Here is why, and how the driver makes the
+distinction.
+
+**The firmware decides the split, not the driver.** The Ally X MCU (`0b05:1b4c`) exposes **six** HID
+interfaces on a single USB device (`1-2`), each with its own HID report descriptor and its own
+interrupt-IN endpoint. Each interface is a separate `hid_device` in the kernel, probed independently by
+hid-asus. Two of these are relevant:
+
+| interface | endpoint | HID reports | what the MCU puts here |
+|-----------|----------|-------------|------------------------|
+| `1-2:1.0` (hidraw1) | `ep_85` (`0x85`) | 0 input / 0 output / **13 feature** | Pure config: feature reports only (MCU version queries, etc.). **No** input, **no** LED control packets. This is the PR62 target. |
+| `1-2:1.2` (hidraw3) | `ep_83` (`0x83`) | 4 input / 1 output / **3 feature** | N-KEY vendor interface: carries `0x5a` button events (M1/M2 paddles) on the input side, **and** the LED config/set/apply feature reports (`0xb3`/`0xb4`/`0xb5`, code page `0xd1`) on the feature side. |
+
+They are separate because the MCU's report descriptors define completely different report sets on each
+interface — the `1.0` descriptor declares only feature reports (config queries), while the `1.2`
+descriptor declares the mix of button-input reports *and* LED-control feature reports. The kernel
+creates a separate `hid_device` for each, with a separate `hdev`, separate hidraw node, and separate
+interrupt endpoint.
+
+**How hid-asus dispatches between them.** `ally_get_endpoint_address()` reads the `bEndpointAddress`
+from whichever interface the current `hdev` is bound to. `hid_asus_ally_probe()` switches on that
+address:
+
+- `case HID_ALLY_INTF_CFG_IN` (= `0x83`): this is the N-KEY/LED interface (`1-2:1.2`). The driver calls
+  `ally_rgb_create(hdev)` here, stores `led_rgb->hdev = hdev`, and registers the `led_classdev_mc` under
+  this `hdev`. All LED feature-report traffic (`ally_dev_set_report(led_rgb->hdev, ...)`) goes through
+  this interface's USB pipe.
+- `case HID_ALLY_INTF_KEYBOARD_IN` (= `0x81`): standard HID keyboard (`1-2:1.3`).
+- `case HID_ALLY_X_INTF_IN` (= `0x87`): gamepad (`1-2:1.5`).
+- Everything else (including `1-2:1.0` with `0x85`): falls through to `default` — hid-asus does nothing
+  Ally-specific. The interface is still bound by the generic hid-asus/N-KEY path, but no LED, gamepad,
+  or keyboard init runs for it.
+
+So `1-2:1.0` is "feature-only" because the **MCU's descriptor** puts zero input reports there, and is
+"not-RGB" because its endpoint (`0x85`) **doesn't match any Ally dispatch case** — the driver never runs
+`ally_rgb_create()` for it. The LED lives on `1-2:1.2` because that is the interface whose endpoint
+(`0x83`) matches `HID_ALLY_INTF_CFG_IN`, where the driver registers the LED.
+
+**Consequence for PR62:** since PR62 acts on `1-2:1.0` (stopping its pointless ep5 poll) and the LED
+is registered on `1-2:1.2` (a completely separate USB pipe, ep3), the patch cannot affect LED writes on
+this Ally X. This is structurally different from the laptop topology where both functions share one
+interface.
+
+**Quick verification on a live system:**
+```bash
+# Confirm which interface owns which endpoint:
+ls /sys/bus/usb/devices/1-2:1.0/ep_85/   # exists (feature-only node)
+ls /sys/bus/usb/devices/1-2:1.2/ep_83/   # exists (N-KEY + LED node)
+ls /sys/bus/usb/devices/1-2:1.0/ep_83/   # does not exist
+
+# Confirm the LED classdev is parented to 1-2:1.2:
+readlink -f /sys/class/leds/ally\:rgb\:joystick_rings/device
+# → .../1-2:1.2/...
+```
 
 ---
 
@@ -213,9 +272,9 @@ summary numbers are retained here.) During Session 1 the ep5 arming was confirme
 - **Structurally validated (§9):** with `usbhid_custom`, opening the feature-only node logs the bypass and
   arms no ep5 poll, vs stock usbhid which arms it. The patch does what it claims.
 - **Scope on this unit:** the feature-only interface the patch acts on (`1-2:1.0`) is a *config* interface;
-  the LED is registered on `1-2:1.2`. So here the patch changes neither input nor RGB. This differs from the
-  laptop topology, where the feature-only node *is* the RGB node — so the "RGB might break" regression
-  question does not apply the same way on this Ally.
+  the LED is registered on `1-2:1.2` (see §1.1 for the endpoint-address proof). So here the patch changes
+  neither input nor RGB. This differs from the laptop topology, where the feature-only node *is* the RGB
+  node — so the "RGB might break" regression question does not apply the same way on this Ally.
 
 ---
 
