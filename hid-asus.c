@@ -152,6 +152,7 @@ enum ally_rgb_effect {
 	ALLY_RGB_EFFECT_BREATHING	= 1,
 	ALLY_RGB_EFFECT_COLOR_CYCLE	= 2,
 	ALLY_RGB_EFFECT_RAINBOW		= 3,
+	ALLY_RGB_EFFECT_STROBE		= 4,
 	ALLY_RGB_EFFECT_COUNT,
 };
 
@@ -171,6 +172,20 @@ struct ally_rgb_report {
 	u8 bg_green;		/* background green */
 	u8 bg_blue;		/* background blue */
 } __packed;
+
+/*
+ * Map compact enum index -> hardware wire byte (B3 offset 3).
+ * Decouples the sysfs string index from the non-sequential HW values.
+ * For effects 0-3 the wire byte == enum index (no change to existing behavior);
+ * Strobe diverges: enum index 4 -> wire byte 0x0A.
+ */
+static const u8 ally_rgb_effect_wire[] = {
+	[ALLY_RGB_EFFECT_STATIC]      = 0x00,
+	[ALLY_RGB_EFFECT_BREATHING]   = 0x01,
+	[ALLY_RGB_EFFECT_COLOR_CYCLE] = 0x02,
+	[ALLY_RGB_EFFECT_RAINBOW]     = 0x03,
+	[ALLY_RGB_EFFECT_STROBE]      = 0x0a,
+};
 
 #define I2C_KEYBOARD_QUIRKS			(QUIRK_FIX_NOTEBOOK_REPORT | \
 						 QUIRK_NO_INIT_REPORTS | \
@@ -240,7 +255,7 @@ struct ally_rgb_dev {
 };
 
 /*
- * Persistent LED state — survives suspend/resume and device re-creation.
+ * Persistent LED state - survives suspend/resume and device re-creation.
  *
  * The ROG Ally X fully re-probes (destroys and recreates) the USB device on
  * resume. All devm-managed memory including the led_classdev, subled_info,
@@ -3775,7 +3790,7 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		.report_id = FEATURE_KBD_REPORT_ID,
 		.cmd = ALLY_LED_CMD_CONFIG,
 		.zone = 0x00,
-		.effect = ally_drvdata.led_rgb_data.mode,
+		.effect = ally_rgb_effect_wire[ally_drvdata.led_rgb_data.mode],
 		/*
 		 * Unscaled intensity, not the scaled .brightness: animation
 		 * dimming is the 4-level 0x5d hardware control, so scaled
@@ -3989,7 +4004,7 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 	}
 }
 
-/* Resume LEDs after suspend — called from hid_asus_ally_reset_resume */
+/* Resume LEDs after suspend - called from hid_asus_ally_reset_resume */
 static void ally_rgb_resume(void)
 {
 	struct ally_rgb_dev *led_rgb = ally_drvdata.led_rgb_dev;
@@ -4013,6 +4028,7 @@ static const char *const ally_rgb_effect_strings[] = {
 	[ALLY_RGB_EFFECT_BREATHING]	= "breathe",
 	[ALLY_RGB_EFFECT_COLOR_CYCLE]	= "chroma",
 	[ALLY_RGB_EFFECT_RAINBOW]	= "rainbow",
+	[ALLY_RGB_EFFECT_STROBE]	= "strobe",
 };
 
 static ssize_t effect_show(struct device *dev,
@@ -4314,7 +4330,7 @@ static struct ally_handheld *hid_asus_ally_probe(struct hid_device *hdev)
 				return ERR_PTR(ret);
 
 
-			/* LED ring init — non-fatal if it fails */
+			/* LED ring init - non-fatal if it fails */
 			ally_drvdata.led_rgb_dev = ally_rgb_create(hdev);
 			if (IS_ERR(ally_drvdata.led_rgb_dev)) {
 				hid_warn(hdev, "Failed to create Ally RGB LEDs\n");
