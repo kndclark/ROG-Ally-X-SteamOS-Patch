@@ -277,6 +277,7 @@ struct ally_rgb_data {
 	u8 bg_red;
 	u8 bg_green;
 	u8 bg_blue;
+	u8 direction; /* 0=reverse, 1=forward */
 	bool enabled;
 	bool initialized;
 };
@@ -3802,6 +3803,7 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		.red = led_rgb->led_rgb_dev.subled_info[0].intensity,
 		.green = led_rgb->led_rgb_dev.subled_info[1].intensity,
 		.blue = led_rgb->led_rgb_dev.subled_info[2].intensity,
+		.direction = ally_drvdata.led_rgb_data.direction,
 	};
 
 	/* 
@@ -3834,7 +3836,6 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 			idx = 2;
 
 		rpt.speed = speed_lut[idx];
-		rpt.direction = 0x01;
 	}
 
 	memcpy(buf, &rpt, sizeof(rpt));
@@ -4199,6 +4200,36 @@ static ssize_t color2_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(color2);
 
+static const char *const ally_rgb_direction_strings[] = {
+	"reverse", "forward"
+};
+
+static ssize_t direction_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	u8 dir = ally_drvdata.led_rgb_data.direction;
+
+	if (dir >= ARRAY_SIZE(ally_rgb_direction_strings))
+		return -EINVAL;
+	return sysfs_emit(buf, "%s\n", ally_rgb_direction_strings[dir]);
+}
+
+static ssize_t direction_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	int dir = sysfs_match_string(ally_rgb_direction_strings, buf);
+
+	if (dir < 0)
+		return dir;
+
+	ally_drvdata.led_rgb_data.direction = dir;
+	ally_rgb_queue_update(true);
+
+	return count;
+}
+static DEVICE_ATTR_RW(direction);
+
 static struct attribute *ally_rgb_attrs[] = {
 	&dev_attr_effect.attr,
 	&dev_attr_effect_index.attr,
@@ -4209,6 +4240,7 @@ static struct attribute *ally_rgb_attrs[] = {
 	&dev_attr_enabled.attr,
 	&dev_attr_enabled_index.attr,
 	&dev_attr_color2.attr,
+	&dev_attr_direction.attr,
 	NULL,
 };
 
@@ -4296,8 +4328,10 @@ static struct ally_rgb_dev *ally_rgb_create(struct hid_device *hdev)
 	}
 
 	/* Initialize state if not already done */
-	if (!ally_drvdata.led_rgb_data.initialized)
+	if (!ally_drvdata.led_rgb_data.initialized) {
 		ally_drvdata.led_rgb_data.enabled = true;
+		ally_drvdata.led_rgb_data.direction = 1;
+	}
 
 	ally_rgb_apply_brightness(led_rgb);
 
