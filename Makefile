@@ -3,7 +3,7 @@ obj-m += hid-asus.o asus-wmi-stub.o
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
 all:
-	make -C $(KDIR) M=$(PWD) modules
+	make -C $(KDIR) M=$(PWD) modules CONFIG_DEBUG_INFO_BTF_MODULES=
 
 clean:
 	@if [ -d "$(KDIR)" ]; then \
