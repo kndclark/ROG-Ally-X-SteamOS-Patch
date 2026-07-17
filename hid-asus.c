@@ -45,6 +45,8 @@ MODULE_AUTHOR("Yusuke Fujimaki <usk.fujimaki@gmail.com>");
 MODULE_AUTHOR("Brendan McGrath <redmcg@redmandi.dyndns.org>");
 MODULE_AUTHOR("Victor Vlasenko <victor.vlasenko@sysgears.com>");
 MODULE_AUTHOR("Frederik Wenigwieser <frederik.wenigwieser@gmail.com>");
+MODULE_AUTHOR("Denis Benato <denis.benato@linux.dev>");
+MODULE_AUTHOR("Luke Jones <luke@ljones.dev>");
 MODULE_DESCRIPTION("Asus HID Keyboard and TouchPad");
 
 #define T100_TPAD_INTF 2
@@ -534,14 +536,18 @@ enum ally_command_codes {
 	CMD_SET_ANTI_DEADZONE           = 0x18,
 };
 
-enum ally_gamepad_mode {
+enum ally_gamepad_mode_index {
 	ALLY_GAMEPAD_MODE_GAMEPAD = 0x01,
 	ALLY_GAMEPAD_MODE_KEYBOARD = 0x02,
 };
 
-static const char *const gamepad_mode_names[] = {
-	[ALLY_GAMEPAD_MODE_GAMEPAD] = "gamepad",
-	[ALLY_GAMEPAD_MODE_KEYBOARD] = "keyboard"
+static const char *const ally_gamepad_mode_text[] = {
+	"gamepad", "desktop"
+};
+
+static const u8 ally_gamepad_mode[] = {
+	ALLY_GAMEPAD_MODE_GAMEPAD,
+	ALLY_GAMEPAD_MODE_KEYBOARD
 };
 
 /*
@@ -556,6 +562,12 @@ static const u8 ALLY_FORCE_FEEDBACK_OFF[] = {
 };
 static_assert(sizeof(struct ff_report) == sizeof(ALLY_FORCE_FEEDBACK_OFF));
 
+/*
+ * The ROG Ally device presents multiple USB interfaces (keyboard, mouse, gamepad,
+ * and custom configuration interface) that bind to the same module. Since only
+ * one ROG Ally device can be connected at a time, we use a single global static
+ * ally_handheld structure to share state across these separate HID interfaces.
+ */
 /* Changes to ally_drvdata must lock */
 static DEFINE_MUTEX(ally_data_mutex);
 static struct ally_handheld ally_drvdata = {
@@ -630,7 +642,6 @@ static bool handle_ctrl_alt_del(struct hid_device *hdev,
 	case 3:
 		if (data[1] == 0x04 && data[2] == 0x00 && data[3] == 0x4c) {
 			ally->cad_sequence_state = 4;
-			data[1] = 0x00;
 			data[1] = data[3] = 0x00;
 			return true;
 		}
@@ -647,9 +658,9 @@ static bool handle_ctrl_alt_del(struct hid_device *hdev,
 	return false;
 }
 
-static bool handle_ally_event(struct hid_device *hdev, u8 *data, int size)
+static bool handle_ally_event(struct hid_device *hdev, struct ally_handheld *ally, u8 *data, int size)
 {
-	struct input_dev *keyboard_input = ally_drvdata.keyboard_input;
+	struct input_dev *keyboard_input;
 	int keycode = 0;
 
 	if (data[0] == 0x5A) {
@@ -670,13 +681,15 @@ static bool handle_ally_event(struct hid_device *hdev, u8 *data, int size)
 			return false;
 		}
 
-		keyboard_input = ally_drvdata.keyboard_input;
-		if (keyboard_input && keycode > 0) {
-			input_report_key(keyboard_input, keycode, 1);
-			input_sync(keyboard_input);
-			input_report_key(keyboard_input, keycode, 0);
-			input_sync(keyboard_input);
-			return true;
+		scoped_guard(mutex, &ally_data_mutex) {
+			keyboard_input = ally->keyboard_input;
+			if (keyboard_input) {
+				input_report_key(keyboard_input, keycode, 1);
+				input_sync(keyboard_input);
+				input_report_key(keyboard_input, keycode, 0);
+				input_sync(keyboard_input);
+				return true;
+			}
 		}
 	}
 	return false;
@@ -898,8 +911,7 @@ static DEVICE_ATTR_RW(xbox_controller);
  *
  * Returns: 0 on success, negative on failure
  */
-static int ally_set_gamepad_mode(struct ally_handheld *ally,
-				 struct hid_device *hdev, u8 mode)
+static int ally_set_gamepad_mode(struct ally_handheld *ally, struct hid_device *hdev, u8 mode)
 {
 	struct ally_config *cfg = ally->config;
 	u8 payload[] = { mode };
@@ -924,71 +936,79 @@ static int ally_set_gamepad_mode(struct ally_handheld *ally,
 		return ret;
 	}
 
-	guard(mutex)(&cfg->config_mutex);
-	cfg->gamepad_mode = mode;
-
-	hid_info(hdev, "Set gamepad mode to %s\n", gamepad_mode_names[mode]);
 	return 0;
 }
 
-static ssize_t gamepad_mode_show(struct device *dev,
-				 struct device_attribute *attr, char *buf)
+static ssize_t gamepad_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
 	struct ally_handheld *ally = drvdata->rog_ally;
 	struct ally_config *cfg;
+	int mode;
 
 	if (!ally || !ally->config)
 		return -ENODEV;
 
 	cfg = ally->config;
+	mode = cfg->gamepad_mode;
 
-	if (cfg->gamepad_mode >= ALLY_GAMEPAD_MODE_GAMEPAD &&
-	    cfg->gamepad_mode <= ALLY_GAMEPAD_MODE_KEYBOARD) {
-		return sysfs_emit(buf, "%s\n",
-			       gamepad_mode_names[cfg->gamepad_mode]);
-	} else {
-		return sysfs_emit(buf, "unknown (%u)\n", cfg->gamepad_mode);
-	}
+	if (mode < ARRAY_SIZE(ally_gamepad_mode))
+		return sysfs_emit(buf, "%s\n", ally_gamepad_mode_text[mode]);
+
+	return sysfs_emit(buf, "unsupported\n");
 }
 
-static ssize_t gamepad_mode_store(struct device *dev,
-				  struct device_attribute *attr,
+static ssize_t gamepad_mode_store(struct device *dev, struct device_attribute *attr,
 				  const char *buf, size_t count)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
 	struct ally_handheld *ally = drvdata->rog_ally;
+	struct ally_config *cfg;
+	u8 mode_byte;
 	int mode;
 	int ret;
 
 	if (!ally || !ally->config)
 		return -ENODEV;
 
-	mode = sysfs_match_string(gamepad_mode_names, buf);
+	cfg = ally->config;
+
+	mode = sysfs_match_string(ally_gamepad_mode_text, buf);
 	if (mode < 0) {
 		hid_err(hdev, "Unknown gamepad mode\n");
 		return mode;
 	}
 
-	ret = ally_set_gamepad_mode(ally, hdev, mode);
+	/* Convert the index of the text mode array to the byte
+	 * that will be accepted by the ally MCU.
+	 */
+	mode_byte = ally_gamepad_mode[mode];
+
+	ret = ally_set_gamepad_mode(ally, hdev, mode_byte);
 	if (ret < 0)
 		return ret;
+
+	scoped_guard(mutex, &cfg->config_mutex)
+		cfg->gamepad_mode = mode_byte;
+
+	hid_dbg(hdev, "Set gamepad mode to %s\n", ally_gamepad_mode_text[mode]);
 
 	return count;
 }
 
-static ssize_t gamepad_modes_available_show(struct device *dev,
+static ssize_t gamepad_mode_index_show(struct device *dev,
 					    struct device_attribute *attr,
 					    char *buf)
 {
 	int i;
-	int len = 0;
+	ssize_t len = 0;
 
-	for (i = ALLY_GAMEPAD_MODE_GAMEPAD; i <= ALLY_GAMEPAD_MODE_KEYBOARD;
-	     i++) {
-		len += sysfs_emit_at(buf, len, "%s ", gamepad_mode_names[i]);
+	for (i = 0; i < ARRAY_SIZE(ally_gamepad_mode_text); i++) {
+		if (!ally_gamepad_mode_text[i] || ally_gamepad_mode_text[i][0] == '\0')
+                        continue;
+                len += sysfs_emit_at(buf, len, "%s ", ally_gamepad_mode_text[i]);
 	}
 
 	/* Replace the last space with a newline */
@@ -999,9 +1019,10 @@ static ssize_t gamepad_modes_available_show(struct device *dev,
 }
 
 static DEVICE_ATTR_RW(gamepad_mode);
-static DEVICE_ATTR_RO(gamepad_modes_available);
+static DEVICE_ATTR_RO(gamepad_mode_index);
 
-static int ally_set_default_gamepad_mode(struct hid_device *hdev, struct ally_handheld *ally,
+static int ally_set_default_gamepad_mode(struct hid_device *hdev,
+					 struct ally_handheld *ally,
 					 struct ally_config *cfg)
 {
 	cfg->gamepad_mode = ALLY_GAMEPAD_MODE_GAMEPAD;
@@ -1145,11 +1166,14 @@ static DEVICE_ATTR_RW(vibration_intensity_right);
  *
  * Returns 0 on success, negative error code on failure
  */
-static int ally_set_joystick_thresholds(struct hid_device *hdev, u8 left_it, u8 left_ot,
-					       u8 right_it, u8 right_ot)
+static int ally_set_joystick_thresholds(struct hid_device *hdev, struct ally_config *cfg,
+					u8 left_it, u8 left_ot, u8 right_it, u8 right_ot)
 {
 	u8 payload[] = { left_it, left_ot, right_it, right_ot };
 	int ret;
+
+	if (!cfg->xbox_controller_support)
+		return -ENODEV;
 
 	u8 *buf __free(kfree) = ally_alloc_cmd(CMD_SET_JOYSTICK_DEADZONE, payload, sizeof(payload));
 	if (!buf)
@@ -1194,7 +1218,7 @@ static ssize_t left_joystick_inner_threshold_store(struct device *dev,
 	if (ret || value > 50)
 		return -EINVAL;
 
-	ret = ally_set_joystick_thresholds(hdev,
+	ret = ally_set_joystick_thresholds(hdev, ally->config,
 					   value,
 					   ally->config->left_outer_threshold,
 					   ally->config->right_deadzone,
@@ -1240,7 +1264,7 @@ static ssize_t left_joystick_outer_threshold_store(struct device *dev,
 	if (ret || value < 70 || value > 100)
 		return -EINVAL;
 
-	ret = ally_set_joystick_thresholds(hdev,
+	ret = ally_set_joystick_thresholds(hdev, ally->config,
 					   ally->config->left_deadzone,
 					   value,
 					   ally->config->right_deadzone,
@@ -1286,7 +1310,7 @@ static ssize_t right_joystick_inner_threshold_store(struct device *dev,
 	if (ret || value > 50)
 		return -EINVAL;
 
-	ret = ally_set_joystick_thresholds(hdev,
+	ret = ally_set_joystick_thresholds(hdev, ally->config,
 					   ally->config->left_deadzone,
 					   ally->config->left_outer_threshold,
 					   value,
@@ -1332,7 +1356,7 @@ static ssize_t right_joystick_outer_threshold_store(struct device *dev,
 	if (ret || value < 70 || value > 100)
 		return -EINVAL;
 
-	ret = ally_set_joystick_thresholds(hdev,
+	ret = ally_set_joystick_thresholds(hdev, ally->config,
 					   ally->config->left_deadzone,
 					   ally->config->left_outer_threshold,
 					   ally->config->right_deadzone,
@@ -1507,11 +1531,14 @@ ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_max, anti_deadzone_max, "
  *
  * Returns 0 on success, negative error code on failure
  */
-static int ally_set_trigger_ranges(struct hid_device *hdev, u8 left_it, u8 left_ot,
-					       u8 right_it, u8 right_ot)
+static int ally_set_trigger_ranges(struct hid_device *hdev, struct ally_config *cfg,
+				   u8 left_it, u8 left_ot, u8 right_it, u8 right_ot)
 {
 	const u8 payload[] = { left_it, left_ot, right_it, right_ot };
 	int ret;
+
+	if (!cfg->xbox_controller_support)
+		return -ENODEV;
 
 	u8 *buf __free(kfree) = ally_alloc_cmd(CMD_SET_TRIGGER_RANGE, payload, sizeof(payload));
 	if (!buf)
@@ -1556,7 +1583,7 @@ static ssize_t left_trigger_range_lower_limit_store(struct device *dev,
 	if (ret || value > 50)
 		return -EINVAL;
 
-	ret = ally_set_trigger_ranges(hdev,
+	ret = ally_set_trigger_ranges(hdev, ally->config,
 					   value,
 					   ally->config->left_trigger_max,
 					   ally->config->right_trigger_min,
@@ -1602,7 +1629,7 @@ static ssize_t right_trigger_range_upper_limit_store(struct device *dev,
 	if (ret || value < 70 || value > 100)
 		return -EINVAL;
 
-	ret = ally_set_trigger_ranges(hdev,
+	ret = ally_set_trigger_ranges(hdev, ally->config,
 					   ally->config->left_trigger_min,
 					   ally->config->left_trigger_max,
 					   ally->config->right_trigger_min,
@@ -1648,7 +1675,7 @@ static ssize_t right_trigger_range_lower_limit_store(struct device *dev,
 	if (ret || value > 50)
 		return -EINVAL;
 
-	ret = ally_set_trigger_ranges(hdev,
+	ret = ally_set_trigger_ranges(hdev, ally->config,
 					   ally->config->left_trigger_min,
 					   ally->config->left_trigger_max,
 					   value,
@@ -1694,7 +1721,7 @@ static ssize_t left_trigger_range_upper_limit_store(struct device *dev,
 	if (ret || value < 70 || value > 100)
 		return -EINVAL;
 
-	ret = ally_set_trigger_ranges(hdev,
+	ret = ally_set_trigger_ranges(hdev, ally->config,
 					   ally->config->left_trigger_min,
 					   value,
 					   ally->config->right_trigger_min,
@@ -2006,7 +2033,7 @@ static struct attribute *ally_config_attrs[] = {
 	&dev_attr_vibration_intensity_left.attr,
 	&dev_attr_vibration_intensity_right.attr,
 	&dev_attr_gamepad_mode.attr,
-	&dev_attr_gamepad_modes_available.attr,
+	&dev_attr_gamepad_mode_index.attr,
 	NULL
 };
 
@@ -3211,7 +3238,7 @@ static void ally_config_remove(struct hid_device *hdev, struct ally_handheld *al
  * and on driver init/resume, after the asus handshake
  * has been performed on the configuration endpoint.
  */
-static int ally_gamepad_check_ready(struct hid_device *hdev)
+static int ally_gamepad_check_ready(struct ally_handheld *ally, struct hid_device *hdev)
 {
 	u8 payload[] = { 0x00 };
 	int ret = -ENODEV;
@@ -3221,7 +3248,7 @@ static int ally_gamepad_check_ready(struct hid_device *hdev)
 		if (!buf)
 			return -ENOMEM;
 
-		ret = ally_gamepad_send_receive_packet(&ally_drvdata, hdev, buf, ROG_ALLY_REPORT_SIZE);
+		ret = ally_gamepad_send_receive_packet(ally, hdev, buf, ROG_ALLY_REPORT_SIZE);
 		if (ret < 0) {
 			hid_dbg(hdev, "ROG Ally check %d/%d failed: %d\n", i,
 				 HID_ALLY_READY_MAX_TRIES, ret);
@@ -3238,10 +3265,13 @@ static int ally_gamepad_check_ready(struct hid_device *hdev)
 	return ret;
 }
 
-static u8 ally_get_endpoint_address(struct hid_device *hdev)
+static int ally_get_endpoint_address(struct hid_device *hdev)
 {
 	struct usb_host_endpoint *ep;
 	struct usb_interface *intf;
+
+	if (!hid_is_usb(hdev))
+		return -ENODEV;
 
 	intf = to_usb_interface(hdev->dev.parent);
 	if (!intf || !intf->cur_altsetting)
@@ -3361,8 +3391,7 @@ static int ally_x_play_effect(struct input_dev *idev, void *data,
 	return 0;
 }
 
-static struct input_dev *ally_x_alloc_input_dev(struct hid_device *hdev,
-						const char *name_suffix)
+static struct input_dev *ally_x_alloc_input_dev(struct hid_device *hdev)
 {
 	struct input_dev *input_dev = devm_input_allocate_device(&hdev->dev);
 
@@ -3383,7 +3412,7 @@ static struct input_dev *ally_x_alloc_input_dev(struct hid_device *hdev,
 
 static int ally_x_setup_input(struct hid_device *hdev, struct ally_handheld *ally)
 {
-	struct input_dev *input = ally_x_alloc_input_dev(hdev, NULL);
+	struct input_dev *input = ally_x_alloc_input_dev(hdev);
 	int ret;
 
 	if (IS_ERR(input))
@@ -3439,7 +3468,7 @@ ally_x_setup_input_err:
 	return ret;
 }
 
-static int hid_asus_ally_init(struct hid_device *hdev)
+static int hid_asus_ally_init(struct hid_device *hdev, struct ally_handheld *ally)
 {
 	int ret;
 
@@ -3447,21 +3476,21 @@ static int hid_asus_ally_init(struct hid_device *hdev)
 	 * This function assumes the asus-specific initialization
 	 * to have been performed already at this point.
 	 */
-	ret = ally_gamepad_check_ready(hdev);
+	ret = ally_gamepad_check_ready(ally, hdev);
 	if (ret < 0) {
 		hid_err(hdev, "ROG Ally device is not ready: %d\n", ret);
 		return ret;
 	}
 
 	/* Failure at this point is non-critical */
-	ret = ally_gamepad_send_packet(&ally_drvdata, hdev, ALLY_FORCE_FEEDBACK_OFF,
+	ret = ally_gamepad_send_packet(ally, hdev, ALLY_FORCE_FEEDBACK_OFF,
 				       sizeof(ALLY_FORCE_FEEDBACK_OFF));
 	if (ret < 0)
 		hid_err(hdev, "Ally failed to init force-feedback off: %d\n", ret);
 
 	/* Set the default gamepad mode now that the MCU is confirmed ready */
-	if (ally_drvdata.config) {
-		ret = ally_set_default_gamepad_mode(hdev, &ally_drvdata, ally_drvdata.config);
+	if (ally->config) {
+		ret = ally_set_default_gamepad_mode(hdev, ally, ally->config);
 		if (ret < 0)
 			hid_warn(hdev, "Failed to set default gamepad mode: %d\n", ret);
 	}
@@ -3472,18 +3501,23 @@ static int hid_asus_ally_init(struct hid_device *hdev)
 static bool hid_asus_ally_raw_event(struct hid_device *hdev, struct ally_handheld *ally,
 			struct hid_report *report, u8 *data, int size)
 {
+	struct input_dev *x_input;
+	struct hid_device *x_hdev;
+
 	if (!ally)
 		return false;
 
 	switch (ally_get_endpoint_address(hdev)) {
 	case HID_ALLY_X_INTF_IN:
-		if (ally_x_raw_event(ally_drvdata.ally_x_input,
-				     ally_drvdata.ally_x_hdev, report,
-				     data, size))
+		scoped_guard(mutex, &ally_data_mutex) {
+			x_input = ally->ally_x_input;
+			x_hdev = ally->ally_x_hdev;
+		}
+		if (ally_x_raw_event(x_input, x_hdev, report, data, size))
 			return true;
 		break;
 	case HID_ALLY_INTF_CFG_IN:
-		if (handle_ally_event(hdev, data, size))
+		if (handle_ally_event(hdev, ally, data, size))
 			return true;
 		break;
 	case HID_ALLY_INTF_KEYBOARD_IN:
@@ -4065,14 +4099,14 @@ static void ally_rgb_remove(struct hid_device *hdev)
  */
 static struct ally_handheld *hid_asus_ally_probe(struct hid_device *hdev)
 {
-	int ret, ep = ally_get_endpoint_address(hdev);
+	int ret = 0, ep = ally_get_endpoint_address(hdev);
 	struct ally_config *ally_cfg;
 	struct hid_input *hidinput;
 
 	if (ep < 0)
 		return ERR_PTR(ep);
 
-	scoped_guard(mutex, &ally_data_mutex)
+	scoped_guard(mutex, &ally_data_mutex) {
 		switch (ep) {
 		case HID_ALLY_INTF_CFG_IN:
 			ally_drvdata.cfg_hdev = hdev;
@@ -4085,7 +4119,7 @@ static struct ally_handheld *hid_asus_ally_probe(struct hid_device *hdev)
 			ally_drvdata.config = ally_cfg;
 
 			/* Finish the initialization of the MCU */
-			ret = hid_asus_ally_init(hdev);
+			ret = hid_asus_ally_init(hdev, &ally_drvdata);
 			if (ret < 0)
 				return ERR_PTR(ret);
 
@@ -4119,6 +4153,8 @@ static struct ally_handheld *hid_asus_ally_probe(struct hid_device *hdev)
 			/* This is normally supposed to happen */
 			break;
 		}
+
+	}
 
 	return &ally_drvdata;
 }
@@ -4161,7 +4197,7 @@ static int hid_asus_ally_reset_resume(struct hid_device *hdev, struct ally_handh
 	if (ep != HID_ALLY_INTF_CFG_IN)
 		return 0;
 
-	ret = hid_asus_ally_init(hdev);
+	ret = hid_asus_ally_init(hdev, ally);
 	if (ret < 0)
 		return ret;
 
@@ -5207,7 +5243,7 @@ static int __maybe_unused asus_reset_resume(struct hid_device *hdev)
 	ret = asus_initialize_reports(hdev);
 	if (ret) {
 		hid_err(hdev, "Asus initialize reports failed: %d\n", ret);
-		goto asus_reset_resume_err;
+		return ret;
 	}
 
 	if (drvdata->tp)
@@ -5217,13 +5253,11 @@ static int __maybe_unused asus_reset_resume(struct hid_device *hdev)
 		ret = hid_asus_ally_reset_resume(hdev, drvdata->rog_ally);
 		if (ret) {
 			hid_err(hdev, "Failed to resume ROG Ally HID extensions: %d\n", ret);
-			goto asus_reset_resume_err;
+			return ret;
 		}
 	}
 
 	return 0;
-asus_reset_resume_err:
-	return ret;
 }
 static int asus_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
