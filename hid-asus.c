@@ -47,7 +47,7 @@ MODULE_AUTHOR("Victor Vlasenko <victor.vlasenko@sysgears.com>");
 MODULE_AUTHOR("Frederik Wenigwieser <frederik.wenigwieser@gmail.com>");
 MODULE_AUTHOR("Denis Benato <denis.benato@linux.dev>");
 MODULE_AUTHOR("Luke Jones <luke@ljones.dev>");
-MODULE_AUTHOR("Khamunetri Clark <khamunetri.clark@gmail.com>");
+MODULE_AUTHOR("Khamunetri Clark <khamunetriclark@gmail.com>");
 MODULE_DESCRIPTION("Asus HID Keyboard and TouchPad");
 
 #define T100_TPAD_INTF 2
