@@ -197,7 +197,7 @@ struct ally_rgb_report {
 	static ssize_t fname##_show(struct device *dev,				\
 				   struct device_attribute *attr, char *buf)	\
 	{									\
-		return sprintf(buf, value);					\
+		return sysfs_emit(buf, value);					\
 	}									\
 	struct device_attribute dev_attr_##fname =				\
 		__ATTR(sysfs_name, 0444, fname##_show, NULL)
@@ -326,6 +326,11 @@ struct ally_btn_turbo_params {
 	u8 toggle;
 } __packed;
 
+#define ALLY_TURBO_PERIOD_MIN 0
+#define ALLY_TURBO_PERIOD_MAX 20
+#define ALLY_TOGGLE_PERIOD_MIN 0
+#define ALLY_TOGGLE_PERIOD_MAX 255
+
 /* Collection of all button turbo settings */
 struct ally_turbo_config {
 	struct ally_btn_turbo_params btn_du;
@@ -346,7 +351,21 @@ struct ally_turbo_config {
 	struct ally_btn_turbo_params btn_m1;
 };
 
-struct ally_btn_sysfs_entry;
+struct ally_btn_turbo_attr;
+struct button_remap_attr;
+
+struct ally_btn_sysfs_entry {
+	struct attribute_group group;
+	struct attribute *attrs[7]; /* turbo + ranges + remap + macro + NULL */
+	struct ally_config *cfg;
+	struct hid_device *hdev;
+	enum ally_button_id btn;
+	struct device_attribute attr_turbo_period;
+	struct device_attribute attr_toggle_period;
+	struct ally_btn_turbo_attr *turbo_attr;
+	struct button_remap_attr *remap_attr;
+	struct button_remap_attr *macro_attr;
+};
 
 struct ally_config {
 	/* Must be locked if the data is being changed */
@@ -659,7 +678,8 @@ static bool handle_ctrl_alt_del(struct hid_device *hdev,
 	return false;
 }
 
-static bool handle_ally_event(struct hid_device *hdev, struct ally_handheld *ally, u8 *data, int size)
+static bool handle_ally_event(struct hid_device *hdev, struct ally_handheld *ally,
+			      u8 *data, int size)
 {
 	struct input_dev *keyboard_input;
 	int keycode = 0;
@@ -870,7 +890,7 @@ static ssize_t xbox_controller_show(struct device *dev,
 	if (!cfg->xbox_controller_support)
 		return -ENODEV;
 
-	return sprintf(buf, "%d\n", cfg->xbox_controller_enabled);
+	return sysfs_emit(buf, "%d\n", cfg->xbox_controller_enabled ? 1 : 0);
 }
 
 static ssize_t xbox_controller_store(struct device *dev,
@@ -946,16 +966,19 @@ static ssize_t gamepad_mode_show(struct device *dev, struct device_attribute *at
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
 	struct ally_handheld *ally = drvdata->rog_ally;
 	struct ally_config *cfg;
-	int mode;
+	u8 mode_byte;
+	int i;
 
 	if (!ally || !ally->config)
 		return -ENODEV;
 
 	cfg = ally->config;
-	mode = cfg->gamepad_mode;
+	mode_byte = cfg->gamepad_mode;
 
-	if (mode < ARRAY_SIZE(ally_gamepad_mode))
-		return sysfs_emit(buf, "%s\n", ally_gamepad_mode_text[mode]);
+	for (i = 0; i < ARRAY_SIZE(ally_gamepad_mode); i++) {
+		if (ally_gamepad_mode[i] == mode_byte)
+			return sysfs_emit(buf, "%s\n", ally_gamepad_mode_text[i]);
+	}
 
 	return sysfs_emit(buf, "unsupported\n");
 }
@@ -1008,8 +1031,8 @@ static ssize_t gamepad_mode_index_show(struct device *dev,
 
 	for (i = 0; i < ARRAY_SIZE(ally_gamepad_mode_text); i++) {
 		if (!ally_gamepad_mode_text[i] || ally_gamepad_mode_text[i][0] == '\0')
-                        continue;
-                len += sysfs_emit_at(buf, len, "%s ", ally_gamepad_mode_text[i]);
+			continue;
+		len += sysfs_emit_at(buf, len, "%s ", ally_gamepad_mode_text[i]);
 	}
 
 	/* Replace the last space with a newline */
@@ -1043,10 +1066,10 @@ static int ally_set_default_gamepad_mode(struct hid_device *hdev,
 static int ally_set_vibration_intensity(struct hid_device *hdev, struct ally_config *cfg,
 					u8 left, u8 right)
 {
-	u8 payload[] = { left, right };
+	const u8 data[] = { left, right };
 	int ret;
 
-	u8 *buf __free(kfree) = ally_alloc_cmd(CMD_SET_VIBRATION_INTENSITY, payload, sizeof(payload));
+	u8 *buf __free(kfree) = ally_alloc_cmd(CMD_SET_VIBRATION_INTENSITY, data, sizeof(data));
 	if (!buf)
 		return -ENOMEM;
 
@@ -1059,7 +1082,7 @@ static int ally_set_vibration_intensity(struct hid_device *hdev, struct ally_con
 	return 0;
 }
 
-static ssize_t vibration_intensity_left_show(struct device *dev, struct device_attribute *attr,
+static ssize_t left_vibration_intensity_show(struct device *dev, struct device_attribute *attr,
 					char *buf)
 {
 	struct hid_device *hdev = to_hid_device(dev);
@@ -1072,10 +1095,10 @@ static ssize_t vibration_intensity_left_show(struct device *dev, struct device_a
 
 	cfg = ally->config;
 
-	return sprintf(buf, "%u\n", cfg->vibration_intensity_left);
+	return sysfs_emit(buf, "%u\n", cfg->vibration_intensity_left);
 }
 
-static ssize_t vibration_intensity_left_store(struct device *dev, struct device_attribute *attr,
+static ssize_t left_vibration_intensity_store(struct device *dev, struct device_attribute *attr,
 					 const char *buf, size_t count)
 {
 	struct hid_device *hdev = to_hid_device(dev);
@@ -1104,9 +1127,13 @@ static ssize_t vibration_intensity_left_store(struct device *dev, struct device_
 	return count;
 }
 
-static DEVICE_ATTR_RW(vibration_intensity_left);
+static ssize_t left_vibration_intensity_range_show(struct device *dev,
+						   struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "0 100\n");
+}
 
-static ssize_t vibration_intensity_right_show(struct device *dev, struct device_attribute *attr,
+static ssize_t right_vibration_intensity_show(struct device *dev, struct device_attribute *attr,
 					char *buf)
 {
 	struct hid_device *hdev = to_hid_device(dev);
@@ -1119,10 +1146,10 @@ static ssize_t vibration_intensity_right_show(struct device *dev, struct device_
 
 	cfg = ally->config;
 
-	return sprintf(buf, "%u\n", cfg->vibration_intensity_right);
+	return sysfs_emit(buf, "%u\n", cfg->vibration_intensity_right);
 }
 
-static ssize_t vibration_intensity_right_store(struct device *dev, struct device_attribute *attr,
+static ssize_t right_vibration_intensity_store(struct device *dev, struct device_attribute *attr,
 					 const char *buf, size_t count)
 {
 	struct hid_device *hdev = to_hid_device(dev);
@@ -1151,7 +1178,23 @@ static ssize_t vibration_intensity_right_store(struct device *dev, struct device
 	return count;
 }
 
-static DEVICE_ATTR_RW(vibration_intensity_right);
+static ssize_t right_vibration_intensity_range_show(struct device *dev,
+						    struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "0 100\n");
+}
+
+static struct device_attribute dev_attr_left_vibration_intensity =
+	__ATTR(intensity, 0644, left_vibration_intensity_show, left_vibration_intensity_store);
+
+static struct device_attribute dev_attr_left_vibration_intensity_range =
+	__ATTR(intensity_range, 0444, left_vibration_intensity_range_show, NULL);
+
+static struct device_attribute dev_attr_right_vibration_intensity =
+	__ATTR(intensity, 0644, right_vibration_intensity_show, right_vibration_intensity_store);
+
+static struct device_attribute dev_attr_right_vibration_intensity_range =
+	__ATTR(intensity_range, 0444, right_vibration_intensity_range_show, NULL);
 
 /**
  * ally_set_joystick_thresholds() - Generic function to set joystick ranges
@@ -1199,7 +1242,7 @@ static ssize_t left_joystick_inner_threshold_show(struct device *dev, struct dev
 	if (!ally || !ally->config)
 		return -ENODEV;
 
-	return sprintf(buf, "%hhu\n", ally->config->left_deadzone);
+	return sysfs_emit(buf, "%u\n", ally->config->left_deadzone);
 }
 
 static ssize_t left_joystick_inner_threshold_store(struct device *dev,
@@ -1233,7 +1276,12 @@ static ssize_t left_joystick_inner_threshold_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RW(left_joystick_inner_threshold);
+static ssize_t left_joystick_inner_threshold_range_show(struct device *dev,
+							 struct device_attribute *attr,
+							 char *buf)
+{
+	return sysfs_emit(buf, "0 50\n");
+}
 
 static ssize_t left_joystick_outer_threshold_show(struct device *dev, struct device_attribute *attr,
 				      char *buf)
@@ -1245,7 +1293,7 @@ static ssize_t left_joystick_outer_threshold_show(struct device *dev, struct dev
 	if (!ally || !ally->config)
 		return -ENODEV;
 
-	return sprintf(buf, "%hhu\n", ally->config->left_outer_threshold);
+	return sysfs_emit(buf, "%u\n", ally->config->left_outer_threshold);
 }
 
 static ssize_t left_joystick_outer_threshold_store(struct device *dev,
@@ -1279,10 +1327,15 @@ static ssize_t left_joystick_outer_threshold_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RW(left_joystick_outer_threshold);
+static ssize_t left_joystick_outer_threshold_range_show(struct device *dev,
+							 struct device_attribute *attr,
+							 char *buf)
+{
+	return sysfs_emit(buf, "70 100\n");
+}
 
-static ssize_t right_joystick_inner_threshold_show(struct device *dev, struct device_attribute *attr,
-				      char *buf)
+static ssize_t right_joystick_inner_threshold_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
@@ -1291,7 +1344,7 @@ static ssize_t right_joystick_inner_threshold_show(struct device *dev, struct de
 	if (!ally || !ally->config)
 		return -ENODEV;
 
-	return sprintf(buf, "%hhu\n", ally->config->right_deadzone);
+	return sysfs_emit(buf, "%u\n", ally->config->right_deadzone);
 }
 
 static ssize_t right_joystick_inner_threshold_store(struct device *dev,
@@ -1325,10 +1378,16 @@ static ssize_t right_joystick_inner_threshold_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RW(right_joystick_inner_threshold);
+static ssize_t right_joystick_inner_threshold_range_show(struct device *dev,
+							  struct device_attribute *attr,
+							  char *buf)
+{
+	return sysfs_emit(buf, "0 50\n");
+}
 
-static ssize_t right_joystick_outer_threshold_show(struct device *dev, struct device_attribute *attr,
-				      char *buf)
+static ssize_t right_joystick_outer_threshold_show(struct device *dev,
+						   struct device_attribute *attr,
+						   char *buf)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
@@ -1337,12 +1396,12 @@ static ssize_t right_joystick_outer_threshold_show(struct device *dev, struct de
 	if (!ally || !ally->config)
 		return -ENODEV;
 
-	return sprintf(buf, "%hhu\n", ally->config->right_outer_threshold);
+	return sysfs_emit(buf, "%u\n", ally->config->right_outer_threshold);
 }
 
 static ssize_t right_joystick_outer_threshold_store(struct device *dev,
-				       struct device_attribute *attr,
-				       const char *buf, size_t count)
+						    struct device_attribute *attr,
+						    const char *buf, size_t count)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
@@ -1371,12 +1430,40 @@ static ssize_t right_joystick_outer_threshold_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RW(right_joystick_outer_threshold);
+static ssize_t right_joystick_outer_threshold_range_show(struct device *dev,
+							 struct device_attribute *attr,
+							 char *buf)
+{
+	return sysfs_emit(buf, "70 100\n");
+}
 
-ALLY_DEVICE_CONST_ATTR_RO(left_joystick_inner_threshold_min, inner_threshold_min, "0\n");
-ALLY_DEVICE_CONST_ATTR_RO(left_joystick_inner_threshold_max, inner_threshold_max, "50\n");
-ALLY_DEVICE_CONST_ATTR_RO(right_joystick_outer_threshold_min, outer_threshold_min, "70\n");
-ALLY_DEVICE_CONST_ATTR_RO(right_joystick_outer_threshold_max, outer_threshold_max, "100\n");
+static struct device_attribute dev_attr_left_joystick_inner_threshold =
+	__ATTR(inner_threshold, 0644, left_joystick_inner_threshold_show,
+	       left_joystick_inner_threshold_store);
+
+static struct device_attribute dev_attr_left_joystick_inner_threshold_range =
+	__ATTR(inner_threshold_range, 0444, left_joystick_inner_threshold_range_show, NULL);
+
+static struct device_attribute dev_attr_left_joystick_outer_threshold =
+	__ATTR(outer_threshold, 0644, left_joystick_outer_threshold_show,
+	       left_joystick_outer_threshold_store);
+
+static struct device_attribute dev_attr_left_joystick_outer_threshold_range =
+	__ATTR(outer_threshold_range, 0444, left_joystick_outer_threshold_range_show, NULL);
+
+static struct device_attribute dev_attr_right_joystick_inner_threshold =
+	__ATTR(inner_threshold, 0644, right_joystick_inner_threshold_show,
+	       right_joystick_inner_threshold_store);
+
+static struct device_attribute dev_attr_right_joystick_inner_threshold_range =
+	__ATTR(inner_threshold_range, 0444, right_joystick_inner_threshold_range_show, NULL);
+
+static struct device_attribute dev_attr_right_joystick_outer_threshold =
+	__ATTR(outer_threshold, 0644, right_joystick_outer_threshold_show,
+	       right_joystick_outer_threshold_store);
+
+static struct device_attribute dev_attr_right_joystick_outer_threshold_range =
+	__ATTR(outer_threshold_range, 0444, right_joystick_outer_threshold_range_show, NULL);
 
 /**
  * ally_set_anti_deadzone - Set anti-deadzone values for joysticks
@@ -1390,7 +1477,7 @@ static int ally_set_anti_deadzone(struct hid_device *hdev, u8 left_adz, u8 right
 {
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
 	struct ally_handheld *const ally = drvdata->rog_ally;
-	u8 payload[] = { left_adz, right_adz };
+	const u8 payload[] = { left_adz, right_adz };
 	int ret;
 
 	u8 *buf __free(kfree) = ally_alloc_cmd(CMD_SET_ANTI_DEADZONE, payload, sizeof(payload));
@@ -1426,61 +1513,10 @@ static ssize_t left_joystick_anti_deadzone_show(struct device *dev, struct devic
 		return -EOPNOTSUPP;
 	}
 
-	return sprintf(buf, "%hhu\n", ally->config->left_anti_deadzone);
+	return sysfs_emit(buf, "%u\n", ally->config->left_anti_deadzone);
 }
 
 static ssize_t left_joystick_anti_deadzone_store(struct device *dev, struct device_attribute *attr,
-						 const char *buf, size_t count)
-{
-	struct hid_device *hdev = to_hid_device(dev);
-	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
-	struct ally_handheld *const ally = drvdata->rog_ally;
-	u8 value;
-	int ret;
-
-	if (!ally || !ally->config)
-		return -ENODEV;
-
-	if (!ally->config->anti_deadzone_support) {
-		hid_dbg(hdev, "Anti-deadzone not supported on this device\n");
-		return -EOPNOTSUPP;
-	}
-
-	ret = kstrtou8(buf, 10, &value);
-	if (ret || value > 100)
-		return -EINVAL;
-
-	ret = ally_set_anti_deadzone(hdev, ally->config->left_anti_deadzone, value);
-	if (ret)
-		return ret;
-
-	scoped_guard(mutex, &ally->config->config_mutex)
-		ally->config->left_anti_deadzone = value;
-
-	return count;
-}
-
-static DEVICE_ATTR_RW(left_joystick_anti_deadzone);
-
-static ssize_t right_joystick_anti_deadzone_show(struct device *dev, struct device_attribute *attr,
-						char *buf)
-{
-	struct hid_device *hdev = to_hid_device(dev);
-	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
-	struct ally_handheld *const ally = drvdata->rog_ally;
-
-	if (!ally || !ally->config)
-		return -ENODEV;
-
-	if (!ally->config->anti_deadzone_support) {
-		hid_dbg(hdev, "Anti-deadzone not supported on this device\n");
-		return -EOPNOTSUPP;
-	}
-
-	return sprintf(buf, "%hhu\n", ally->config->right_anti_deadzone);
-}
-
-static ssize_t right_joystick_anti_deadzone_store(struct device *dev, struct device_attribute *attr,
 						 const char *buf, size_t count)
 {
 	struct hid_device *hdev = to_hid_device(dev);
@@ -1506,17 +1542,87 @@ static ssize_t right_joystick_anti_deadzone_store(struct device *dev, struct dev
 		return ret;
 
 	scoped_guard(mutex, &ally->config->config_mutex)
+		ally->config->left_anti_deadzone = value;
+
+	return count;
+}
+
+static ssize_t left_joystick_anti_deadzone_range_show(struct device *dev,
+						       struct device_attribute *attr,
+						       char *buf)
+{
+	return sysfs_emit(buf, "0 100\n");
+}
+
+static ssize_t right_joystick_anti_deadzone_show(struct device *dev, struct device_attribute *attr,
+						char *buf)
+{
+	struct hid_device *hdev = to_hid_device(dev);
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	struct ally_handheld *const ally = drvdata->rog_ally;
+
+	if (!ally || !ally->config)
+		return -ENODEV;
+
+	if (!ally->config->anti_deadzone_support) {
+		hid_dbg(hdev, "Anti-deadzone not supported on this device\n");
+		return -EOPNOTSUPP;
+	}
+
+	return sysfs_emit(buf, "%u\n", ally->config->right_anti_deadzone);
+}
+
+static ssize_t right_joystick_anti_deadzone_store(struct device *dev, struct device_attribute *attr,
+						 const char *buf, size_t count)
+{
+	struct hid_device *hdev = to_hid_device(dev);
+	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
+	struct ally_handheld *const ally = drvdata->rog_ally;
+	u8 value;
+	int ret;
+
+	if (!ally || !ally->config)
+		return -ENODEV;
+
+	if (!ally->config->anti_deadzone_support) {
+		hid_dbg(hdev, "Anti-deadzone not supported on this device\n");
+		return -EOPNOTSUPP;
+	}
+
+	ret = kstrtou8(buf, 10, &value);
+	if (ret || value > 100)
+		return -EINVAL;
+
+	ret = ally_set_anti_deadzone(hdev, ally->config->left_anti_deadzone, value);
+	if (ret)
+		return ret;
+
+	scoped_guard(mutex, &ally->config->config_mutex)
 		ally->config->right_anti_deadzone = value;
 
 	return count;
 }
 
-static DEVICE_ATTR_RW(right_joystick_anti_deadzone);
+static ssize_t right_joystick_anti_deadzone_range_show(struct device *dev,
+							struct device_attribute *attr,
+							char *buf)
+{
+	return sysfs_emit(buf, "0 100\n");
+}
 
-ALLY_DEVICE_CONST_ATTR_RO(left_joystick_anti_deadzone_min, anti_deadzone_min, "0\n");
-ALLY_DEVICE_CONST_ATTR_RO(left_joystick_anti_deadzone_max, anti_deadzone_max, "100\n");
-ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_min, anti_deadzone_min, "0\n");
-ALLY_DEVICE_CONST_ATTR_RO(right_joystick_anti_deadzone_max, anti_deadzone_max, "100\n");
+static struct device_attribute dev_attr_left_joystick_anti_deadzone =
+	__ATTR(anti_deadzone, 0644, left_joystick_anti_deadzone_show,
+	       left_joystick_anti_deadzone_store);
+
+static struct device_attribute dev_attr_left_joystick_anti_deadzone_range =
+	__ATTR(anti_deadzone_range, 0444, left_joystick_anti_deadzone_range_show, NULL);
+
+static struct device_attribute dev_attr_right_joystick_anti_deadzone =
+	__ATTR(anti_deadzone, 0644, right_joystick_anti_deadzone_show,
+	       right_joystick_anti_deadzone_store);
+
+static struct device_attribute dev_attr_right_joystick_anti_deadzone_range =
+	__ATTR(anti_deadzone_range, 0444, right_joystick_anti_deadzone_range_show, NULL);
 
 /**
  * ally_set_trigger_ranges() - Generic function to set triggers ranges
@@ -1554,8 +1660,8 @@ static int ally_set_trigger_ranges(struct hid_device *hdev, struct ally_config *
 	return 0;
 }
 
-static ssize_t left_trigger_range_lower_limit_show(struct device *dev, struct device_attribute *attr,
-				      char *buf)
+static ssize_t left_trigger_range_lower_limit_show(struct device *dev,
+						   struct device_attribute *attr, char *buf)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
@@ -1564,7 +1670,7 @@ static ssize_t left_trigger_range_lower_limit_show(struct device *dev, struct de
 	if (!ally || !ally->config)
 		return -ENODEV;
 
-	return sprintf(buf, "%hhu\n", ally->config->left_trigger_min);
+	return sysfs_emit(buf, "%u\n", ally->config->left_trigger_min);
 }
 
 static ssize_t left_trigger_range_lower_limit_store(struct device *dev,
@@ -1598,10 +1704,15 @@ static ssize_t left_trigger_range_lower_limit_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RW(left_trigger_range_lower_limit);
+static ssize_t left_trigger_range_lower_limit_range_show(struct device *dev,
+							 struct device_attribute *attr,
+							 char *buf)
+{
+	return sysfs_emit(buf, "0 50\n");
+}
 
-static ssize_t right_trigger_range_upper_limit_show(struct device *dev, struct device_attribute *attr,
-				      char *buf)
+static ssize_t right_trigger_range_upper_limit_show(struct device *dev,
+						    struct device_attribute *attr, char *buf)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
@@ -1610,7 +1721,7 @@ static ssize_t right_trigger_range_upper_limit_show(struct device *dev, struct d
 	if (!ally || !ally->config)
 		return -ENODEV;
 
-	return sprintf(buf, "%hhu\n", ally->config->right_trigger_max);
+	return sysfs_emit(buf, "%u\n", ally->config->right_trigger_max);
 }
 
 static ssize_t right_trigger_range_upper_limit_store(struct device *dev,
@@ -1644,10 +1755,15 @@ static ssize_t right_trigger_range_upper_limit_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RW(right_trigger_range_upper_limit);
+static ssize_t right_trigger_range_upper_limit_range_show(struct device *dev,
+							 struct device_attribute *attr,
+							 char *buf)
+{
+	return sysfs_emit(buf, "70 100\n");
+}
 
-static ssize_t right_trigger_range_lower_limit_show(struct device *dev, struct device_attribute *attr,
-				      char *buf)
+static ssize_t right_trigger_range_lower_limit_show(struct device *dev,
+						    struct device_attribute *attr, char *buf)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
@@ -1656,12 +1772,12 @@ static ssize_t right_trigger_range_lower_limit_show(struct device *dev, struct d
 	if (!ally || !ally->config)
 		return -ENODEV;
 
-	return sprintf(buf, "%hhu\n", ally->config->right_trigger_min);
+	return sysfs_emit(buf, "%u\n", ally->config->right_trigger_min);
 }
 
 static ssize_t right_trigger_range_lower_limit_store(struct device *dev,
-				       struct device_attribute *attr,
-				       const char *buf, size_t count)
+						     struct device_attribute *attr,
+						     const char *buf, size_t count)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
@@ -1690,10 +1806,16 @@ static ssize_t right_trigger_range_lower_limit_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RW(right_trigger_range_lower_limit);
+static ssize_t right_trigger_range_lower_limit_range_show(struct device *dev,
+							  struct device_attribute *attr,
+							  char *buf)
+{
+	return sysfs_emit(buf, "0 50\n");
+}
 
-static ssize_t left_trigger_range_upper_limit_show(struct device *dev, struct device_attribute *attr,
-				      char *buf)
+static ssize_t left_trigger_range_upper_limit_show(struct device *dev,
+						   struct device_attribute *attr,
+						   char *buf)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
@@ -1702,12 +1824,12 @@ static ssize_t left_trigger_range_upper_limit_show(struct device *dev, struct de
 	if (!ally || !ally->config)
 		return -ENODEV;
 
-	return sprintf(buf, "%hhu\n", ally->config->left_trigger_max);
+	return sysfs_emit(buf, "%u\n", ally->config->left_trigger_max);
 }
 
 static ssize_t left_trigger_range_upper_limit_store(struct device *dev,
-				       struct device_attribute *attr,
-				       const char *buf, size_t count)
+						    struct device_attribute *attr,
+						    const char *buf, size_t count)
 {
 	struct hid_device *hdev = to_hid_device(dev);
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
@@ -1736,7 +1858,40 @@ static ssize_t left_trigger_range_upper_limit_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RW(left_trigger_range_upper_limit);
+static ssize_t left_trigger_range_upper_limit_range_show(struct device *dev,
+							 struct device_attribute *attr,
+							 char *buf)
+{
+	return sysfs_emit(buf, "70 100\n");
+}
+
+static struct device_attribute dev_attr_left_trigger_range_lower_limit =
+	__ATTR(range_lower_limit, 0644, left_trigger_range_lower_limit_show,
+	       left_trigger_range_lower_limit_store);
+
+static struct device_attribute dev_attr_left_trigger_range_lower_limit_range =
+	__ATTR(range_lower_limit_range, 0444, left_trigger_range_lower_limit_range_show, NULL);
+
+static struct device_attribute dev_attr_left_trigger_range_upper_limit =
+	__ATTR(range_upper_limit, 0644, left_trigger_range_upper_limit_show,
+	       left_trigger_range_upper_limit_store);
+
+static struct device_attribute dev_attr_left_trigger_range_upper_limit_range =
+	__ATTR(range_upper_limit_range, 0444, left_trigger_range_upper_limit_range_show, NULL);
+
+static struct device_attribute dev_attr_right_trigger_range_lower_limit =
+	__ATTR(range_lower_limit, 0644, right_trigger_range_lower_limit_show,
+	       right_trigger_range_lower_limit_store);
+
+static struct device_attribute dev_attr_right_trigger_range_lower_limit_range =
+	__ATTR(range_lower_limit_range, 0444, right_trigger_range_lower_limit_range_show, NULL);
+
+static struct device_attribute dev_attr_right_trigger_range_upper_limit =
+	__ATTR(range_upper_limit, 0644, right_trigger_range_upper_limit_show,
+	       right_trigger_range_upper_limit_store);
+
+static struct device_attribute dev_attr_right_trigger_range_upper_limit_range =
+	__ATTR(range_upper_limit_range, 0444, right_trigger_range_upper_limit_range_show, NULL);
 
 enum ally_joystick_side {
 	JOYSTICK_LEFT = 0,
@@ -1899,7 +2054,7 @@ static ssize_t response_curve_pct_store(struct device *dev,
 {
 	struct ally_config *cfg = ally->config;
 	struct ally_joystick_resp_curve *curve;
-	u8 value;
+	u8 value, *curve_entry;
 	int ret;
 
 	if (!cfg->resp_curve_support)
@@ -1914,16 +2069,24 @@ static ssize_t response_curve_pct_store(struct device *dev,
 
 	curve = is_left ? &cfg->left_curve : &cfg->right_curve;
 
-	scoped_guard(mutex, &cfg->config_mutex) {
+	scoped_guard(mutex, &cfg->config_mutex)
 		switch (idx) {
-		case 1: curve->entry_1.resp = value; break;
-		case 2: curve->entry_2.resp = value; break;
-		case 3: curve->entry_3.resp = value; break;
-		case 4: curve->entry_4.resp = value; break;
+		case 1:
+			curve_entry = &curve->entry_1.resp;
+			break;
+		case 2:
+			curve_entry = &curve->entry_2.resp;
+			break;
+		case 3:
+			curve_entry = &curve->entry_3.resp;
+			break;
+		case 4:
+			curve_entry = &curve->entry_4.resp;
+			break;
 		default: return -EINVAL;
 		}
-	}
 
+	*curve_entry = value;
 	return count;
 }
 
@@ -1935,7 +2098,7 @@ static ssize_t response_curve_move_store(struct device *dev,
 {
 	struct ally_config *cfg = ally->config;
 	struct ally_joystick_resp_curve *curve;
-	u8 value;
+	u8 value, *curve_entry;
 	int ret;
 
 	if (!cfg->resp_curve_support)
@@ -1952,14 +2115,23 @@ static ssize_t response_curve_move_store(struct device *dev,
 
 	scoped_guard(mutex, &cfg->config_mutex) {
 		switch (idx) {
-		case 1: curve->entry_1.move = value; break;
-		case 2: curve->entry_2.move = value; break;
-		case 3: curve->entry_3.move = value; break;
-		case 4: curve->entry_4.move = value; break;
+		case 1:
+			curve_entry = &curve->entry_1.move;
+			break;
+		case 2:
+			curve_entry = &curve->entry_2.move;
+			break;
+		case 3:
+			curve_entry = &curve->entry_3.move;
+			break;
+		case 4:
+			curve_entry = &curve->entry_4.move;
+			break;
 		default: return -EINVAL;
 		}
 	}
 
+	*curve_entry = value;
 	return count;
 }
 
@@ -2003,15 +2175,15 @@ static ssize_t response_curve_move_store(struct device *dev,
 		struct hid_device *hdev = to_hid_device(dev);			\
 		struct asus_drvdata *drvdata = hid_get_drvdata(hdev);		\
 		struct ally_handheld *ally = drvdata->rog_ally;			\
-		return response_curve_move_store(dev, attr, buf, count,	\
-						 side##_is_left, ally, region);\
+		return response_curve_move_store(dev, attr, buf, count,	        \
+						 side##_is_left, ally, region); \
 	}
 
 #define DEFINE_JS_CURVE_ATTRS(region, side)					\
 	DEFINE_JS_CURVE_PCT_FOPS(region, side)					\
 	DEFINE_JS_CURVE_MOVE_FOPS(region, side)					\
 	static ALLY_DEVICE_ATTR_RW(side##_response_curve_pct_##region,		\
-				   response_curve_pct_##region);			\
+				   response_curve_pct_##region);		\
 	static ALLY_DEVICE_ATTR_RW(side##_response_curve_move_##region,		\
 				   response_curve_move_##region)
 
@@ -2031,21 +2203,30 @@ DEFINE_JS_CURVE_ATTRS(4, right);
 
 static struct attribute *ally_config_attrs[] = {
 	&dev_attr_xbox_controller.attr,
-	&dev_attr_vibration_intensity_left.attr,
-	&dev_attr_vibration_intensity_right.attr,
 	&dev_attr_gamepad_mode.attr,
 	&dev_attr_gamepad_mode_index.attr,
+	NULL
+};
+
+static struct attribute *ally_left_vibration_attrs[] = {
+	&dev_attr_left_vibration_intensity.attr,
+	&dev_attr_left_vibration_intensity_range.attr,
+	NULL
+};
+
+static struct attribute *ally_right_vibration_attrs[] = {
+	&dev_attr_right_vibration_intensity.attr,
+	&dev_attr_right_vibration_intensity_range.attr,
 	NULL
 };
 
 static struct attribute *left_joystick_axis_attrs[] = {
 	&dev_attr_left_joystick_inner_threshold.attr,
 	&dev_attr_left_joystick_outer_threshold.attr,
-	&dev_attr_left_joystick_inner_threshold_min.attr,
-	&dev_attr_left_joystick_inner_threshold_max.attr,
+	&dev_attr_left_joystick_inner_threshold_range.attr,
+	&dev_attr_left_joystick_outer_threshold_range.attr,
 	&dev_attr_left_joystick_anti_deadzone.attr,
-	&dev_attr_left_joystick_anti_deadzone_min.attr,
-	&dev_attr_left_joystick_anti_deadzone_max.attr,
+	&dev_attr_left_joystick_anti_deadzone_range.attr,
 	&dev_attr_left_response_curve_pct_1.attr,
 	&dev_attr_left_response_curve_pct_2.attr,
 	&dev_attr_left_response_curve_pct_3.attr,
@@ -2061,11 +2242,10 @@ static struct attribute *left_joystick_axis_attrs[] = {
 static struct attribute *right_joystick_axis_attrs[] = {
 	&dev_attr_right_joystick_inner_threshold.attr,
 	&dev_attr_right_joystick_outer_threshold.attr,
-	&dev_attr_right_joystick_outer_threshold_min.attr,
-	&dev_attr_right_joystick_outer_threshold_max.attr,
+	&dev_attr_right_joystick_inner_threshold_range.attr,
+	&dev_attr_right_joystick_outer_threshold_range.attr,
 	&dev_attr_right_joystick_anti_deadzone.attr,
-	&dev_attr_right_joystick_anti_deadzone_min.attr,
-	&dev_attr_right_joystick_anti_deadzone_max.attr,
+	&dev_attr_right_joystick_anti_deadzone_range.attr,
 	&dev_attr_right_response_curve_pct_1.attr,
 	&dev_attr_right_response_curve_pct_2.attr,
 	&dev_attr_right_response_curve_pct_3.attr,
@@ -2081,24 +2261,30 @@ static struct attribute *right_joystick_axis_attrs[] = {
 static struct attribute *left_trigger_attrs[] = {
 	&dev_attr_left_trigger_range_lower_limit.attr,
 	&dev_attr_left_trigger_range_upper_limit.attr,
-	//&dev_attr_right_joystick_outer_threshold.attr,
-	//&dev_attr_right_joystick_outer_threshold_min.attr,
-	//&dev_attr_right_joystick_outer_threshold_max.attr,
+	&dev_attr_left_trigger_range_lower_limit_range.attr,
+	&dev_attr_left_trigger_range_upper_limit_range.attr,
 	NULL
 };
 
 static struct attribute *right_trigger_attrs[] = {
 	&dev_attr_right_trigger_range_lower_limit.attr,
 	&dev_attr_right_trigger_range_upper_limit.attr,
-	//&dev_attr_right_joystick_outer_threshold.attr,
-	//&dev_attr_right_joystick_outer_threshold_min.attr,
-	//&dev_attr_right_joystick_outer_threshold_max.attr,
+	&dev_attr_right_trigger_range_lower_limit_range.attr,
+	&dev_attr_right_trigger_range_upper_limit_range.attr,
 	NULL
 };
 
 static const struct attribute_group ally_attr_groups[] = {
 	{
 		.attrs = ally_config_attrs,
+	},
+	{
+		.name = "left_vibration",
+		.attrs = ally_left_vibration_attrs,
+	},
+	{
+		.name = "right_vibration",
+		.attrs = ally_right_vibration_attrs,
 	},
 	{
 		.name = "left_joystick_axis",
@@ -2119,61 +2305,6 @@ static const struct attribute_group ally_attr_groups[] = {
 };
 
 /**
- * ally_get_turbo_params - Get turbo parameters for a specific button
- * @cfg: Ally config structure
- * @button_id: Button identifier from ally_button_id enum
- *
- * Returns: Pointer to the button's turbo parameters, or NULL if invalid
- */
-static struct ally_btn_turbo_params *ally_get_turbo_params(struct ally_config *cfg,
-							   enum ally_button_id button_id)
-{
-	struct ally_turbo_config *turbo;
-
-	if (!cfg || button_id >= ALLY_BTN_MAX)
-		return NULL;
-
-	turbo = &cfg->turbo;
-
-	switch (button_id) {
-	case ALLY_BTN_A:
-		return &turbo->btn_a;
-	case ALLY_BTN_B:
-		return &turbo->btn_b;
-	case ALLY_BTN_X:
-		return &turbo->btn_x;
-	case ALLY_BTN_Y:
-		return &turbo->btn_y;
-	case ALLY_BTN_LB:
-		return &turbo->btn_lb;
-	case ALLY_BTN_RB:
-		return &turbo->btn_rb;
-	case ALLY_BTN_DU:
-		return &turbo->btn_du;
-	case ALLY_BTN_DD:
-		return &turbo->btn_dd;
-	case ALLY_BTN_DL:
-		return &turbo->btn_dl;
-	case ALLY_BTN_DR:
-		return &turbo->btn_dr;
-	case ALLY_BTN_J0B:
-		return &turbo->btn_j0b;
-	case ALLY_BTN_J1B:
-		return &turbo->btn_j1b;
-	case ALLY_BTN_MENU:
-		return &turbo->btn_menu;
-	case ALLY_BTN_VIEW:
-		return &turbo->btn_view;
-	case ALLY_BTN_M1:
-		return &turbo->btn_m1;
-	case ALLY_BTN_M2:
-		return &turbo->btn_m2;
-	default:
-		return NULL;
-	}
-}
-
-/**
  * ally_set_turbo_params - Set turbo parameters for all buttons
  * @hdev: HID device
  * @cfg: Ally config structure
@@ -2185,8 +2316,7 @@ static int ally_set_turbo_params(struct hid_device *hdev, struct ally_config *cf
 	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
 	struct ally_handheld *ally = drvdata->rog_ally;
 	struct ally_turbo_config *turbo = &cfg->turbo;
-
-	u8 payload[] = { 
+	const u8 payload[] = {
 		turbo->btn_du.turbo,
 		turbo->btn_du.toggle,
 		turbo->btn_dd.turbo,
@@ -2242,95 +2372,166 @@ struct ally_btn_turbo_attr {
 
 #define to_ally_btn_turbo_attr(x) container_of(x, struct ally_btn_turbo_attr, dev_attr)
 
-static ssize_t ally_btn_turbo_show(struct device *dev,
-				   struct device_attribute *attr, char *buf)
+static struct ally_btn_turbo_params *ally_btn_get_turbo_params(struct ally_config *cfg,
+							       enum ally_button_id btn)
 {
-	struct hid_device *hdev = to_hid_device(dev);
-	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
-	struct ally_handheld *ally = drvdata->rog_ally;
-	struct ally_btn_turbo_attr *btn_attr = to_ally_btn_turbo_attr(attr);
-	struct ally_btn_turbo_params *params;
-
-	if (!ally || !ally->config)
-		return -ENODEV;
-
-	if (!ally->config->turbo_support)
-		return -EOPNOTSUPP;
-
-	params = ally_get_turbo_params(ally->config, btn_attr->button_id);
-	if (!params)
-		return -EINVAL;
-
-	/* Format: turbo_interval_ms[,toggle_interval_ms] */
-	if (params->toggle)
-		return sysfs_emit(buf, "%d,%d\n", params->turbo * 50, params->toggle * 50);
-
-	return sysfs_emit(buf, "%d\n", params->turbo * 50);
+	switch (btn) {
+	case ALLY_BTN_DU: return &cfg->turbo.btn_du;
+	case ALLY_BTN_DD: return &cfg->turbo.btn_dd;
+	case ALLY_BTN_DL: return &cfg->turbo.btn_dl;
+	case ALLY_BTN_DR: return &cfg->turbo.btn_dr;
+	case ALLY_BTN_J0B: return &cfg->turbo.btn_j0b;
+	case ALLY_BTN_J1B: return &cfg->turbo.btn_j1b;
+	case ALLY_BTN_LB: return &cfg->turbo.btn_lb;
+	case ALLY_BTN_RB: return &cfg->turbo.btn_rb;
+	case ALLY_BTN_A: return &cfg->turbo.btn_a;
+	case ALLY_BTN_B: return &cfg->turbo.btn_b;
+	case ALLY_BTN_X: return &cfg->turbo.btn_x;
+	case ALLY_BTN_Y: return &cfg->turbo.btn_y;
+	case ALLY_BTN_VIEW: return &cfg->turbo.btn_view;
+	case ALLY_BTN_MENU: return &cfg->turbo.btn_menu;
+	case ALLY_BTN_M2: return &cfg->turbo.btn_m2;
+	case ALLY_BTN_M1: return &cfg->turbo.btn_m1;
+	default: return NULL;
+	}
 }
 
-static ssize_t ally_btn_turbo_store(struct device *dev,
-				    struct device_attribute *attr,
-				    const char *buf, size_t count)
+static ssize_t btn_turbo_period_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
 {
-	struct hid_device *hdev = to_hid_device(dev);
-	struct asus_drvdata *drvdata = hid_get_drvdata(hdev);
-	struct ally_handheld *ally = drvdata->rog_ally;
-	struct ally_btn_turbo_attr *btn_attr = to_ally_btn_turbo_attr(attr);
-	struct ally_btn_turbo_params *params;
-	unsigned int turbo_ms, toggle_ms = 0;
-	int ret;
+	struct ally_btn_sysfs_entry *entry = container_of(attr, struct ally_btn_sysfs_entry,
+							  attr_turbo_period);
+	struct ally_btn_turbo_params *params = ally_btn_get_turbo_params(entry->cfg,
+									 entry->btn);
 
-	if (!ally || !ally->config)
+	if (!params)
 		return -ENODEV;
 
-	if (!ally->config->turbo_support)
+	return sysfs_emit(buf, "%hhu\n", params->turbo);
+}
+
+static ssize_t btn_turbo_period_store(struct device *dev, struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	struct ally_btn_sysfs_entry *entry = container_of(attr, struct ally_btn_sysfs_entry,
+							  attr_turbo_period);
+	struct ally_btn_turbo_params *params;
+	u8 value;
+	int ret;
+
+	if (!entry->cfg->turbo_support)
 		return -EOPNOTSUPP;
 
-	params = ally_get_turbo_params(ally->config, btn_attr->button_id);
+	params = ally_btn_get_turbo_params(entry->cfg, entry->btn);
 	if (!params)
+		return -ENODEV;
+
+	ret = kstrtou8(buf, 10, &value);
+	if (ret)
+		return ret;
+
+	if (value < ALLY_TURBO_PERIOD_MIN || value > ALLY_TURBO_PERIOD_MAX)
 		return -EINVAL;
 
-	/* Parse input: turbo_interval_ms[,toggle_interval_ms] */
-	ret = sscanf(buf, "%u,%u", &turbo_ms, &toggle_ms);
-	if (ret < 1)
-		return -EINVAL;
+	scoped_guard(mutex, &entry->cfg->config_mutex)
+		params->turbo = value;
 
-	if (turbo_ms != 0 && (turbo_ms < 50 || turbo_ms > 1000))
-		return -EINVAL;
-
-	if (ret > 1 && toggle_ms > 0 && (toggle_ms < 50 || toggle_ms > 1000))
-		return -EINVAL;
-
-	scoped_guard(mutex, &ally->config->config_mutex) {
-		params->turbo = turbo_ms / 50;
-		params->toggle = toggle_ms / 50;
-
-		ret = ally_set_turbo_params(hdev, ally->config);
-	}
-
-	if (ret < 0)
+	ret = ally_set_turbo_params(entry->hdev, entry->cfg);
+	if (ret)
 		return ret;
 
 	return count;
 }
 
-/* Helper to create button turbo attribute */
-static struct ally_btn_turbo_attr *ally_btn_turbo_attr_create(int button_id)
+static ssize_t btn_toggle_period_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
 {
-	struct ally_btn_turbo_attr *attr;
+	struct ally_btn_sysfs_entry *entry = container_of(attr, struct ally_btn_sysfs_entry,
+							  attr_toggle_period);
+	struct ally_btn_turbo_params *params = ally_btn_get_turbo_params(entry->cfg, entry->btn);
 
-	attr = kzalloc(sizeof(*attr), GFP_KERNEL);
+	if (!params)
+		return -ENODEV;
+
+	return sysfs_emit(buf, "%hhu\n", params->toggle);
+}
+
+static ssize_t btn_toggle_period_store(struct device *dev, struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct ally_btn_sysfs_entry *entry = container_of(attr, struct ally_btn_sysfs_entry,
+							  attr_toggle_period);
+	struct ally_btn_turbo_params *params;
+	u8 value;
+	int ret;
+
+	if (!entry->cfg->turbo_support)
+		return -EOPNOTSUPP;
+
+	params = ally_btn_get_turbo_params(entry->cfg, entry->btn);
+	if (!params)
+		return -ENODEV;
+
+	ret = kstrtou8(buf, 10, &value);
+	if (ret)
+		return ret;
+
+	if (value < ALLY_TOGGLE_PERIOD_MIN || value > ALLY_TOGGLE_PERIOD_MAX)
+		return -EINVAL;
+
+	scoped_guard(mutex, &entry->cfg->config_mutex)
+		params->toggle = value;
+
+	ret = ally_set_turbo_params(entry->hdev, entry->cfg);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+ALLY_DEVICE_CONST_ATTR_RO(btn_turbo_period_range, turbo_period_range, "0 20\n");
+ALLY_DEVICE_CONST_ATTR_RO(btn_toggle_period_range, toggle_period_range, "0 255\n");
+
+static void ally_btn_turbo_init_attrs(struct ally_btn_sysfs_entry *entry)
+{
+	sysfs_attr_init(&entry->attr_turbo_period.attr);
+	entry->attr_turbo_period.attr.name = "turbo_period";
+	entry->attr_turbo_period.attr.mode = 0644;
+	entry->attr_turbo_period.show = btn_turbo_period_show;
+	entry->attr_turbo_period.store = btn_turbo_period_store;
+
+	sysfs_attr_init(&entry->attr_toggle_period.attr);
+	entry->attr_toggle_period.attr.name = "toggle_period";
+	entry->attr_toggle_period.attr.mode = 0644;
+	entry->attr_toggle_period.show = btn_toggle_period_show;
+	entry->attr_toggle_period.store = btn_toggle_period_store;
+}
+
+/* Helper to create button turbo attribute */
+static struct ally_btn_turbo_attr *ally_btn_turbo_attr_create(struct hid_device *hdev,
+							      struct ally_btn_sysfs_entry *entry)
+{
+	struct ally_btn_turbo_attr *attr __free(kfree) = kzalloc_obj(*attr, GFP_KERNEL);
+
+	if (!entry || !entry->cfg || !entry->cfg->turbo_support)
+		return ERR_PTR(-EOPNOTSUPP);
+
+	if (!ally_btn_get_turbo_params(entry->cfg, entry->btn)) {
+		hid_err(hdev, "Invalid button id %d for turbo attributes\n", entry->btn);
+		return ERR_PTR(-EINVAL);
+	}
+
 	if (!attr)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 
-	attr->button_id = button_id;
-	sysfs_attr_init(&attr->dev_attr.attr);
-	attr->dev_attr.attr.name = "turbo";
-	attr->dev_attr.attr.mode = 0644;
-	attr->dev_attr.show = ally_btn_turbo_show;
-	attr->dev_attr.store = ally_btn_turbo_store;
+	ally_btn_turbo_init_attrs(entry);
+	entry->attrs[0] = &entry->attr_turbo_period.attr;
+	entry->attrs[1] = &entry->attr_toggle_period.attr;
+	entry->attrs[2] = &dev_attr_btn_turbo_period_range.attr;
+	entry->attrs[3] = &dev_attr_btn_toggle_period_range.attr;
+	entry->attrs[4] = NULL;
 
-	return attr;
+	return no_free_ptr(attr);
 }
 
 enum btn_map_type {
@@ -2542,13 +2743,16 @@ static const struct btn_code_map *find_button_by_name(const char *name)
 static int ally_set_button_mapping(struct hid_device *hdev, struct ally_handheld *ally,
 				  struct button_pair_map *mapping)
 {
+	u8 macro_bytes[11] = {0};
+	u8 btn_bytes[10] = {0};
+
 	if (!mapping)
 		return -EINVAL;
 
-	u8 *buf = ally_alloc_cmd(CMD_SET_MAPPING, NULL, 0);
+	u8 *buf __free(kfree) = ally_alloc_cmd(CMD_SET_MAPPING, NULL, 0);
 	if (!buf)
 		return -ENOMEM;
-	
+
 	/* This packet is slightly different from the other
 	 * as before the packet length there is an extra byte
 	 * which is the pair index.
@@ -2560,7 +2764,7 @@ static int ally_set_button_mapping(struct hid_device *hdev, struct ally_handheld
 	buf[5] = mapping->first.remap->type;
 	/* Fill in bytes 6-14 with button code */
 	if (mapping->first.remap->type) {
-		unsigned char btn_bytes[10] = {0};
+		memset(btn_bytes, 0, sizeof(btn_bytes));
 		btn_bytes[0] = mapping->first.remap->type;
 
 		switch (mapping->first.remap->type) {
@@ -2581,7 +2785,7 @@ static int ally_set_button_mapping(struct hid_device *hdev, struct ally_handheld
 	/* Macro mapping for first button if any */
 	buf[15] = mapping->first.macro->type;
 	if (mapping->first.macro->type) {
-		unsigned char macro_bytes[11] = {0};
+		memset(macro_bytes, 0, sizeof(macro_bytes));
 		macro_bytes[0] = mapping->first.macro->type;
 
 		switch (mapping->first.macro->type) {
@@ -2603,7 +2807,7 @@ static int ally_set_button_mapping(struct hid_device *hdev, struct ally_handheld
 	buf[27] = mapping->second.remap->type;
 	/* Fill in bytes 28-36 with button code */
 	if (mapping->second.remap->type) {
-		unsigned char btn_bytes[10] = {0};
+		memset(btn_bytes, 0, sizeof(btn_bytes));
 		btn_bytes[0] = mapping->second.remap->type;
 
 		switch (mapping->second.remap->type) {
@@ -2624,7 +2828,7 @@ static int ally_set_button_mapping(struct hid_device *hdev, struct ally_handheld
 	/* Macro mapping for second button if any */
 	buf[37] = mapping->second.macro->type;
 	if (mapping->second.macro->type) {
-		unsigned char macro_bytes[11] = {0};
+		memset(macro_bytes, 0, sizeof(macro_bytes));
 		macro_bytes[0] = mapping->second.macro->type;
 
 		switch (mapping->second.macro->type) {
@@ -2820,11 +3024,10 @@ static ssize_t button_remap_store(struct device *dev,
 				.button_pairs[pair_idx - 1];
 		btn_map = is_first ? &pair->first : &pair->second;
 
-		if (btn_attr->is_macro) {
+		if (btn_attr->is_macro)
 			btn_map->macro = (struct btn_code_map *)code;
-		} else {
+		else
 			btn_map->remap = (struct btn_code_map *)code;
-		}
 
 		/* Update pair index */
 		pair->pair_index = pair_idx;
@@ -2840,11 +3043,10 @@ static ssize_t button_remap_store(struct device *dev,
 }
 
 /* Helper to create button remap attribute */
-static struct button_remap_attr *button_remap_attr_create(enum ally_button_id button_id, bool is_macro)
+static struct button_remap_attr *button_remap_attr_create(enum ally_button_id button_id,
+							  bool is_macro)
 {
-	struct button_remap_attr *attr;
-
-	attr = kzalloc(sizeof(*attr), GFP_KERNEL);
+	struct button_remap_attr *attr __free(kfree) = kzalloc_obj(*attr, GFP_KERNEL);
 	if (!attr)
 		return NULL;
 
@@ -2856,7 +3058,7 @@ static struct button_remap_attr *button_remap_attr_create(enum ally_button_id bu
 	attr->dev_attr.show = button_remap_show;
 	attr->dev_attr.store = button_remap_store;
 
-	return attr;
+	return no_free_ptr(attr);
 }
 
 static void ally_set_default_gamepad_mapping(struct ally_button_mapping *mappings)
@@ -2989,15 +3191,6 @@ static void ally_set_default_keyboard_mapping(struct ally_button_mapping *mappin
 		(struct btn_code_map *)&ally_btn_codes[18]; /* KB_M2 */
 }
 
-/* Structure to hold button sysfs information */
-struct ally_btn_sysfs_entry {
-	struct attribute_group group;
-	struct attribute *attrs[4]; /* turbo + remap + macro + NULL terminator */
-	struct ally_btn_turbo_attr *turbo_attr;
-	struct button_remap_attr *remap_attr;
-	struct button_remap_attr *macro_attr;
-};
-
 /**
  * ally_create_button_attributes - Create turbo button attributes
  * @hdev: HID device
@@ -3008,8 +3201,8 @@ struct ally_btn_sysfs_entry {
 static int ally_create_button_attributes(struct hid_device *hdev, struct ally_config *cfg)
 {
 	struct ally_btn_sysfs_entry *entries;
-	int i, ret;
 	struct ally_button_mapping *mappings;
+	int i, ret;
 
 	entries = devm_kcalloc(&hdev->dev, ALLY_BTN_MAX, sizeof(*entries), GFP_KERNEL);
 	if (!entries)
@@ -3029,10 +3222,15 @@ static int ally_create_button_attributes(struct hid_device *hdev, struct ally_co
 	ally_set_default_keyboard_mapping(mappings);
 
 	for (i = 0; i < ALLY_BTN_MAX; i++) {
+		entries[i].cfg = cfg;
+		entries[i].hdev = hdev;
+		entries[i].btn = i;
+
 		if (cfg->turbo_support) {
-			entries[i].turbo_attr = ally_btn_turbo_attr_create(i);
-			if (!entries[i].turbo_attr) {
-				ret = -ENOMEM;
+			entries[i].turbo_attr = ally_btn_turbo_attr_create(hdev, &entries[i]);
+			if (IS_ERR(entries[i].turbo_attr)) {
+				ret = PTR_ERR(entries[i].turbo_attr);
+				entries[i].turbo_attr = NULL;
 				goto err_cleanup;
 			}
 		}
@@ -3051,13 +3249,11 @@ static int ally_create_button_attributes(struct hid_device *hdev, struct ally_co
 
 		/* Set up attributes array based on what's supported */
 		if (cfg->turbo_support) {
-			entries[i].attrs[0] =
-				&entries[i].turbo_attr->dev_attr.attr;
-			entries[i].attrs[1] =
+			entries[i].attrs[4] =
 				&entries[i].remap_attr->dev_attr.attr;
-			entries[i].attrs[2] =
+			entries[i].attrs[5] =
 				&entries[i].macro_attr->dev_attr.attr;
-			entries[i].attrs[3] = NULL;
+			entries[i].attrs[6] = NULL;
 		} else {
 			entries[i].attrs[0] =
 				&entries[i].remap_attr->dev_attr.attr;
@@ -3071,8 +3267,7 @@ static int ally_create_button_attributes(struct hid_device *hdev, struct ally_co
 
 		ret = sysfs_create_group(&hdev->dev.kobj, &entries[i].group);
 		if (ret < 0) {
-			hid_err(hdev,
-				"Failed to create sysfs group for %s: %d\n",
+			hid_err(hdev, "Failed to create sysfs group for %s: %d\n",
 				ally_button_names[i], ret);
 			goto err_cleanup;
 		}
@@ -3083,12 +3278,9 @@ static int ally_create_button_attributes(struct hid_device *hdev, struct ally_co
 err_cleanup:
 	while (--i >= 0) {
 		sysfs_remove_group(&hdev->dev.kobj, &entries[i].group);
-		if (entries[i].turbo_attr)
-			kfree(entries[i].turbo_attr);
-		if (entries[i].remap_attr)
-			kfree(entries[i].remap_attr);
-		if (entries[i].macro_attr)
-			kfree(entries[i].macro_attr);
+		kfree(entries[i].turbo_attr);
+		kfree(entries[i].remap_attr);
+		kfree(entries[i].macro_attr);
 	}
 
 err_free_entries:
@@ -3118,12 +3310,9 @@ static void ally_remove_button_attributes(struct hid_device *hdev, struct ally_c
 
 	for (i = 0; i < ALLY_BTN_MAX; i++) {
 		sysfs_remove_group(&hdev->dev.kobj, &entries[i].group);
-		if (entries[i].turbo_attr)
-			kfree(entries[i].turbo_attr);
-		if (entries[i].remap_attr)
-			kfree(entries[i].remap_attr);
-		if (entries[i].macro_attr)
-			kfree(entries[i].macro_attr);
+		kfree(entries[i].turbo_attr);
+		kfree(entries[i].remap_attr);
+		kfree(entries[i].macro_attr);
 	}
 
 	if (cfg->button_mappings)
