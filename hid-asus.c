@@ -266,9 +266,9 @@ struct ally_rgb_dev {
 struct ally_rgb_data {
 	enum ally_rgb_effect mode;
 	u8 speed;		/* 0-100, mapped to 3 discrete HW levels in apply_effect */
-	/* 
-	 * Minimal intensity cache needed to survive Ally X USB re-probe. 
-	 * The Multicolor LED framework does not restore subled intensities 
+	/*
+	 * Minimal intensity cache needed to survive Ally X USB re-probe.
+	 * The Multicolor LED framework does not restore subled intensities
 	 * to new device instances automatically.
 	 */
 	u8 red;
@@ -714,9 +714,6 @@ static bool handle_ally_event(struct hid_device *hdev, struct ally_handheld *all
 		case 0xA7:
 			keycode = KEY_F17;
 			break;
-		case 0xA8:
-			keycode = KEY_F18;
-			break;
 		default:
 			return false;
 		}
@@ -748,10 +745,8 @@ static bool handle_ally_event(struct hid_device *hdev, struct ally_handheld *all
 static int ally_gamepad_send_packet(struct ally_handheld *ally,
 			     struct hid_device *hdev, const u8 *buf, size_t len)
 {
-	scoped_guard(mutex, &ally->intf_mutex) {
+	scoped_guard(mutex, &ally->intf_mutex)
 		return ally_dev_set_report(hdev, buf, len);
-	}
-	return -ENODEV;
 }
 
 /**
@@ -3650,7 +3645,6 @@ static int ally_x_setup_input(struct hid_device *hdev, struct ally_handheld *all
 	input_set_capability(input, EV_KEY, KEY_PROG1);
 	input_set_capability(input, EV_KEY, KEY_F16);
 	input_set_capability(input, EV_KEY, KEY_F17);
-	input_set_capability(input, EV_KEY, KEY_F18);
 	input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY);
 	input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY1);
 
@@ -3806,8 +3800,8 @@ static int ally_rgb_apply_effect(struct ally_rgb_dev *led_rgb)
 		.direction = ally_drvdata.led_rgb_data.direction,
 	};
 
-	/* 
-	 * Crossfade (duality) is driven by background RGB in offsets 10-12. 
+	/*
+	 * Crossfade (duality) is driven by background RGB in offsets 10-12.
 	 * HW breathing smoothly transitions between primary and bg colors.
 	 */
 	if (ally_drvdata.led_rgb_data.mode == ALLY_RGB_EFFECT_BREATHING) {
@@ -4006,14 +4000,12 @@ static void ally_rgb_resume_work_fn(struct work_struct *work)
 	if (ally_drvdata.keyboard_input) {
 		input_report_key(ally_drvdata.keyboard_input, KEY_F16, 0);
 		input_report_key(ally_drvdata.keyboard_input, KEY_F17, 0);
-		input_report_key(ally_drvdata.keyboard_input, KEY_F18, 0);
 		input_report_key(ally_drvdata.keyboard_input, KEY_PROG1, 0);
 		input_sync(ally_drvdata.keyboard_input);
 	}
 	if (ally_drvdata.ally_x_input) {
 		input_report_key(ally_drvdata.ally_x_input, KEY_F16, 0);
 		input_report_key(ally_drvdata.ally_x_input, KEY_F17, 0);
-		input_report_key(ally_drvdata.ally_x_input, KEY_F18, 0);
 		input_report_key(ally_drvdata.ally_x_input, KEY_PROG1, 0);
 		input_sync(ally_drvdata.ally_x_input);
 	}
@@ -4033,8 +4025,8 @@ static void ally_rgb_resume(void)
 	}
 }
 
-/* Ally RGB sysfs attributes 
- * TODO: these are mapped to the Legion Go S's LED names for SteamOS GameMode compatibility, 
+/* Ally RGB sysfs attributes
+ * TODO: these are mapped to the Legion Go S's LED names for SteamOS GameMode compatibility,
  * but will be changed to Asus branded names for upsteamability.
  */
 
@@ -4273,8 +4265,8 @@ static int ally_rgb_register(struct hid_device *hdev, struct ally_rgb_dev *led_r
 	led_cdev->brightness_set = ally_rgb_set;
 	led_cdev->color = LED_COLOR_ID_RGB;
 
-	/* 
-	 * Restore saved intensities after Ally X re-probe. The Multicolor 
+	/*
+	 * Restore saved intensities after Ally X re-probe. The Multicolor
 	 * LED framework treats this as a fresh device and zeros intensities.
 	 */
 	if (ally_drvdata.led_rgb_data.initialized) {
@@ -5543,6 +5535,7 @@ static int __maybe_unused asus_reset_resume(struct hid_device *hdev)
 
 	return 0;
 }
+
 static int asus_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
 	struct hid_report_enum *rep_enum;
@@ -5627,6 +5620,7 @@ static int asus_probe(struct hid_device *hdev, const struct hid_device_id *id)
 			return ret;
 		}
 	}
+
 	ret = hid_parse(hdev);
 	if (ret) {
 		hid_err(hdev, "Asus hid parse failed: %d\n", ret);
