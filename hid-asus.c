@@ -29,7 +29,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
-#include "asus-wmi.h" // TODO relative pathing removed for Ally X hardware module patch testing
+#include "asus-wmi.h" /* out-of-tree build: local copy of the asus-wmi platform header */
 #include <linux/types.h>
 #include <linux/input/mt.h>
 #include <linux/usb.h> /* For to_usb_interface for T100 touchpad intf check */
@@ -4025,10 +4025,7 @@ static void ally_rgb_resume(void)
 	}
 }
 
-/* Ally RGB sysfs attributes
- * TODO: these are mapped to the Legion Go S's LED names for SteamOS GameMode compatibility,
- * but will be changed to Asus branded names for upsteamability.
- */
+/* Ally RGB sysfs attributes */
 
 static const char *const ally_rgb_effect_strings[] = {
 	[ALLY_RGB_EFFECT_STATIC]	= "monocolor",
