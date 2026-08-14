@@ -92,7 +92,7 @@ def main():
 
         # 1. vendor path alone: a running animation
         print("\n[1] vendor sysfs: static red, then breathe")
-        write_sysfs(led, "effect", "monochrome")
+        write_sysfs(led, "effect", "monocolor")
         write_sysfs(led, "multi_intensity", "255 0 0")
         write_sysfs(led, "brightness", "100")
         time.sleep(1)
@@ -119,8 +119,8 @@ def main():
         ask("Did the breathing effect resume on its own?")
 
         # restore something sane through the vendor path
-        print("\nrestoring: monochrome white via sysfs")
-        write_sysfs(led, "effect", "monochrome")
+        print("\nrestoring: monocolor white via sysfs")
+        write_sysfs(led, "effect", "monocolor")
         write_sysfs(led, "multi_intensity", "255 255 255")
     finally:
         os.close(fd)

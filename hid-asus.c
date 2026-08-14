@@ -635,7 +635,7 @@ static const u8 ally_gamepad_mode[] = {
 };
 
 static const char *const asus_usb_rgb_effect_strings[ASUS_USB_RGB_EFFECT_MAX] = {
-	[ASUS_USB_RGB_EFFECT_STATIC] = "monochrome",
+	[ASUS_USB_RGB_EFFECT_STATIC] = "monocolor",
 	[ASUS_USB_RGB_EFFECT_BREATHING] = "breathe",
 	[ASUS_USB_RGB_EFFECT_COLOR_CYCLE] = "chroma",
 	[ASUS_USB_RGB_EFFECT_RAINBOW] = "rainbow",
@@ -882,9 +882,15 @@ static void asus_usb_rgb_zone_state_default(struct asus_usb_rgb_zone_state *stat
 		state->bg_blue = 0x00;
 		break;
 	case ASUS_AURA_ZONE_JOYSTICK_RING:
-		state->red = 0xff;
-		state->green = 0xff;
-		state->blue = 0xff;
+		/*
+		 * Leave the rings dark until userspace asks for a color: the
+		 * state is pushed to the device once the zone is registered, so
+		 * a lit default lights them on every cold boot until the
+		 * desktop restores its own settings.
+		 */
+		state->red = 0x00;
+		state->green = 0x00;
+		state->blue = 0x00;
 		break;
 	default:
 		state->red = 0x00;
@@ -1729,7 +1735,12 @@ static int asus_usb_rgb_register_zone(struct asus_usb_rgb_dev *rgb, int idx)
 	cdev->brightness = state->brightness;
 	cdev->max_brightness = 100;
 	cdev->brightness_set = asus_usb_rgb_set;
-	cdev->color = LED_COLOR_ID_MULTI;
+	/*
+	 * The rings reproduce arbitrary colors, which LED_COLOR_ID_RGB
+	 * describes; LED_COLOR_ID_MULTI is the generic multicolor case and
+	 * leaves userspace unable to tell the two apart.
+	 */
+	cdev->color = LED_COLOR_ID_RGB;
 
 	zone->subled_info[0].intensity = state->red;
 	zone->subled_info[1].intensity = state->green;
@@ -1938,15 +1949,22 @@ static bool handle_ally_event(struct hid_device *hdev, struct ally_handheld *all
 		return false;
 
 	if (data[0] == 0x5A) {
+		/*
+		 * PROTOTYPE, NOT FOR COMMIT: AC reports one keycode for both
+		 * its short and long press, so userspace can tell them apart by
+		 * duration the way it would for any other button, instead of
+		 * the driver deciding by emitting KEY_F17 for the long press.
+		 * Upstream still expects KEY_F17 here, and InputPlumber's aly1
+		 * map keys the Armoury Crate long-press action off it.
+		 */
 		switch (data[1]) {
 		case 0x38:
+		case 0xA7:
+		case 0xA8:
 			keycode = KEY_PROG1;
 			break;
 		case 0xA6:
 			keycode = KEY_F16;
-			break;
-		case 0xA7:
-			keycode = KEY_F17;
 			break;
 		default:
 			return false;
@@ -1955,10 +1973,36 @@ static bool handle_ally_event(struct hid_device *hdev, struct ally_handheld *all
 		scoped_guard(mutex, &ally_data_mutex) {
 			keyboard_input = ally->keyboard_input;
 			if (keyboard_input) {
-				input_report_key(keyboard_input, keycode, 1);
-				input_sync(keyboard_input);
-				input_report_key(keyboard_input, keycode, 0);
-				input_sync(keyboard_input);
+				if (data[1] == 0xA7 || data[1] == 0xA8) {
+					/*
+					 * The AC long press is the only event
+					 * the MCU brackets: 0xA7 arrives once
+					 * the press threshold is crossed and
+					 * 0xA8 when the button is physically
+					 * released, so the key is held between
+					 * them. Releasing first on 0xA7 recovers
+					 * the state if a 0xA8 was ever lost.
+					 */
+					if (data[1] == 0xA7) {
+						input_report_key(keyboard_input, keycode, 0);
+						input_sync(keyboard_input);
+					}
+					input_report_key(keyboard_input, keycode,
+							 data[1] == 0xA7);
+					input_sync(keyboard_input);
+				} else {
+					/*
+					 * Every other button sends its vendor
+					 * byte followed by 0x00 a millisecond
+					 * later, whether it was tapped or held
+					 * down for seconds, so there is no hold
+					 * to report and the key is pulsed here.
+					 */
+					input_report_key(keyboard_input, keycode, 1);
+					input_sync(keyboard_input);
+					input_report_key(keyboard_input, keycode, 0);
+					input_sync(keyboard_input);
+				}
 				return true;
 			}
 		}
@@ -5367,14 +5411,6 @@ static int asus_raw_event(struct hid_device *hdev,
 		return asus_e1239t_event(drvdata, data, size);
 
 	if (drvdata->quirks & QUIRK_ROG_ALLY_XPAD) {
-		/*
-		 * The Ally MCU sends a non-standard byte (0xA8) for QAM long-press
-		 * release instead of a standard 0x00. We map it to 0x00 here so the
-		 * generic parser can natively handle the key release for 0xA7.
-		 */
-		if (size >= 2 && data[0] == 0x5A && data[1] == 0xA8)
-			data[1] = 0x00;
-
 		/*
 		 * Return -1 to suppress further processing by the generic HID
 		 * input parser for reports we fully handle for the Gamepad (0x0B).
