@@ -226,17 +226,28 @@ fi
 KDIR="/lib/modules/${KVER}/build"
 INSTALL_PATH="/lib/modules/${KVER}/kernel/drivers/hid/"
 
+# Compiling needs no privileges, and building as root leaves root-owned
+# objects behind that make the next unprivileged build fail in MODPOST with
+# "Module.symvers: Permission denied". Reclaim whatever an earlier root build
+# left, then run the compile itself as the user who invoked sudo.
+AS_BUILDER=()
+if [ "$TARGET_USER" != "root" ]; then
+    AS_BUILDER=(runuser -u "$TARGET_USER" --)
+    chown -R "$TARGET_USER" . 2>/dev/null || \
+        warn "Could not reclaim ownership of build files in $(pwd); the build may fail."
+fi
+
 log "Building module using headers at ${KDIR}..."
-make clean KDIR="${KDIR}"
-make all KDIR="${KDIR}"
+"${AS_BUILDER[@]}" make clean KDIR="${KDIR}"
+"${AS_BUILDER[@]}" make all KDIR="${KDIR}"
 
 if [ ! -f "$MODULE_FILE" ]; then
     error "Build failed! $MODULE_FILE not found."
 fi
 
 log "Compressing module..."
-zstd -f "$MODULE_FILE"
-zstd -f "$STUB_FILE"
+"${AS_BUILDER[@]}" zstd -f "$MODULE_FILE"
+"${AS_BUILDER[@]}" zstd -f "$STUB_FILE"
 
 # Backup logic
 mkdir -p "$INSTALL_PATH"
