@@ -97,6 +97,23 @@ if [ -f "$BLACKLIST_FILE" ]; then
     rm -f "$BLACKLIST_FILE"
 fi
 
+# A 'blacklist hid_asus' left over from testing blocks the stock ASUS driver
+# too, so the machine would come back with no LEDs and no working side buttons
+# and nothing to explain why. Match our module only, never hid_asus_ally.
+STRAY=$(grep -rlE "^[[:space:]]*blacklist[[:space:]]+hid[-_]asus([[:space:]]|$)" \
+    /etc/modprobe.d/ 2>/dev/null || true)
+if [ -n "$STRAY" ]; then
+    warn "These files blacklist hid_asus, which also blocks the stock driver:"
+    printf '%s\n' "$STRAY" | while read -r f; do warn "    $f"; done
+    read -p "Remove them? (y/N) " confirm_bl
+    if [[ $confirm_bl =~ ^[Yy]$ ]]; then
+        printf '%s\n' "$STRAY" | xargs -r rm -f
+        log "Removed."
+    else
+        warn "Left in place - the stock driver will not load until they are gone."
+    fi
+fi
+
 # --- 4. System Sync ---
 
 log "Updating dependency map..."
@@ -107,6 +124,30 @@ if lsmod | grep -q "${MODULE_NAME//-/_}"; then
     modprobe -r "${MODULE_NAME//-/_}"
 fi
 modprobe "${MODULE_NAME//-/_}" || warn "Original module failed to load. It may have been removed."
+
+# Report what actually owns the hardware now. A successful modprobe does not
+# mean the interfaces got bound, and an unbound Ally is indistinguishable from
+# broken hardware from userspace.
+log "Verifying driver binding on every ROG Ally interface..."
+sleep 1
+found=0
+for dev in /sys/bus/hid/devices/*; do
+    real=$(readlink -f "$dev")
+    usbdev=$(dirname "$(dirname "$real")")
+    vid=$(cat "$usbdev/idVendor" 2>/dev/null)
+    pid=$(cat "$usbdev/idProduct" 2>/dev/null)
+    case "$vid:$pid" in
+        0b05:1abe|0b05:1b4c) ;;
+        *) continue ;;
+    esac
+    found=1
+    if [ -e "$dev/driver" ]; then
+        log "  $(basename "$dev") -> $(basename "$(readlink -f "$dev/driver")")"
+    else
+        warn "  $(basename "$dev") has NO driver bound"
+    fi
+done
+[ "$found" -eq 1 ] || warn "No ROG Ally HID interfaces found - is the controller connected?"
 
 log "Uninstallation complete!"
 warn "Note: If you re-enabled read-only mode manually, remember to lock it if desired: sudo steamos-readonly enable"
