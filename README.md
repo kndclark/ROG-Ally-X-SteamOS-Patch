@@ -138,7 +138,7 @@ list to include the Ally.
 ## Credits
 
 Built on the ASUS HID driver work of **Luke Jones**, **Denis Benato (NeroReflex)**,
-and **pastaq**, and on protocol findings from the ROG Ally reverse-engineering
+and **Derek Clark (pastaq)**, and on protocol findings from the ROG Ally reverse-engineering
 community.
 
 Hardware protocol notes and captures live in the companion
