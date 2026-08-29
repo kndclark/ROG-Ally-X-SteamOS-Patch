@@ -48,7 +48,7 @@ done
 verify_binding() {
     local found=0 bad=0 dev real usbdev vid pid drv
     for dev in /sys/bus/hid/devices/*; do
-        [ -e "$dev/driver" ] || continue
+        [ -e "$dev/uevent" ] || continue
         real=$(readlink -f "$dev")
         usbdev=$(dirname "$(dirname "$real")")
         vid=$(cat "$usbdev/idVendor" 2>/dev/null)
@@ -62,7 +62,10 @@ verify_binding() {
         # An interface with no driver at all is the blacklist case: it looks
         # identical to broken hardware from userspace (no LEDs, no RGB menu),
         # so name it explicitly instead of skipping it.
-        if [ ! -e "$dev/driver" ]; then
+        # Test the symlink, not -e: `readlink -f` on a missing driver link
+        # returns the path it was handed, so basename yields the literal
+        # string "driver" and an unbound interface reads as a bound one.
+        if [ ! -L "$dev/driver" ]; then
             warn "  $(basename "$dev") has NO driver bound"
             bad=1
             continue
@@ -187,19 +190,17 @@ if [ -d "/lib/modules/$(uname -r)/build" ]; then
     log "Headers for running kernel $(uname -r) are already installed. Skipping headers package installation."
     pacman -Sy --needed --noconfirm base-devel zstd
 else
-    # Attempt to fetch exact headers for the current kernel to prevent upgrading past the active OS image
-    KERNEL_VER_CLEAN=$(echo "$KERNEL_VER" | sed -E 's/([0-9]+)\.([0-9]+)\.([0-9]+)-([^-]+)-([0-9]+)-.*/\1.\2.\3.\4-\5/')
-    EXACT_PKG_URL="https://steamdeck-packages.steamos.cloud/archlinux-mirror/jupiter-main/os/x86_64/${HEADER_PKG}-${KERNEL_VER_CLEAN}-x86_64.pkg.tar.zst"
-    
-    if curl -s -f -I "$EXACT_PKG_URL" > /dev/null; then
-        log "Found exact matching headers in SteamOS archive for $KERNEL_VER_CLEAN"
-        pacman -Sy --needed --noconfirm base-devel zstd
-        pacman -U --noconfirm "$EXACT_PKG_URL"
-    else
-        warn "Exact matching headers for $KERNEL_VER not found in archive. Falling back to latest."
-        pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd
+    log "Installing matching headers ($HEADER_PKG) from repository..."
+    if ! pacman -Sy --needed --noconfirm base-devel "$HEADER_PKG" zstd; then
+        warn "Could not install $HEADER_PKG directly from repository. Trying archive URL..."
+        KERNEL_VER_CLEAN=$(echo "$KERNEL_VER" | sed -E 's/([0-9]+)\.([0-9]+)\.([0-9]+)-([^-]+)-([0-9]+)-.*/\1.\2.\3.\4-\5/')
+        EXACT_PKG_URL="https://steamdeck-packages.steamos.cloud/archlinux-mirror/jupiter-main/os/x86_64/${HEADER_PKG}-${KERNEL_VER_CLEAN}-x86_64.pkg.tar.zst"
+        curl -s -f -L "$EXACT_PKG_URL" -o "/tmp/${HEADER_PKG}.pkg.tar.zst"
+        pacman -U --noconfirm --config <(sed 's/SigLevel.*/SigLevel = Never/' /etc/pacman.conf) "/tmp/${HEADER_PKG}.pkg.tar.zst"
+        rm -f "/tmp/${HEADER_PKG}.pkg.tar.zst"
     fi
 fi
+
 
 # --- 5. Build and Install ---
 
@@ -247,7 +248,12 @@ fi
 
 log "Compressing module..."
 "${AS_BUILDER[@]}" zstd -f "$MODULE_FILE"
-"${AS_BUILDER[@]}" zstd -f "$STUB_FILE"
+# The Makefile only builds the stub on kernels whose asus-wmi lacks the
+# hid-asus listener API; on the ones that have it the stub is a duplicate
+# GPL export that modprobe refuses, so its absence here is the normal case.
+if [ -f "$STUB_FILE" ]; then
+    "${AS_BUILDER[@]}" zstd -f "$STUB_FILE"
+fi
 
 # Backup logic
 mkdir -p "$INSTALL_PATH"
@@ -265,7 +271,14 @@ fi
 
 log "Installing to $INSTALL_PATH..."
 cp -f "$MODULE_ZST" "$TARGET_FILE"
-cp -f "$STUB_ZST" "${INSTALL_PATH}/${STUB_ZST}"
+if [ -f "$STUB_ZST" ]; then
+    cp -f "$STUB_ZST" "${INSTALL_PATH}/${STUB_ZST}"
+elif [ -e "${INSTALL_PATH}/${STUB_ZST}" ]; then
+    # A stub left by an install against an older kernel would still be listed
+    # in modules.dep and would fail to insert here, taking hid-asus with it.
+    log "Removing stale ${STUB_ZST} left by a previous install..."
+    rm -f "${INSTALL_PATH}/${STUB_ZST}"
+fi
 
 log "Updating dependency map..."
 depmod -a
@@ -296,18 +309,81 @@ if [ "${KVER}" != "$(uname -r)" ]; then
 fi
 
 log "Reloading module..."
-if lsmod | grep -q "hid_asus_ally"; then
-    modprobe -r hid_asus_ally || true
-    if lsmod | grep -q "hid_asus_ally"; then
-        warn "Could not unload the stock hid_asus_ally module (still in use?)."
-        warn "It may reclaim Ally interfaces below - the binding check will catch that."
+
+# Tearing down a stock driver while its interfaces are still bound hard-resets
+# this machine: no oops, nothing in pstore, the box power-cycles mid-command.
+# Reproduced twice on 7.2 and isolated with tests/crash_isolate.sh, which also
+# showed the safe order - unbinding each interface first runs the same remove()
+# paths without incident, and the module teardown then completes normally.
+#
+# Two details make this worse than it looks. `modprobe -r hid_asus_ally` also
+# removes hid_asus, because ally depends on it and modprobe cleans up
+# dependencies that fall to zero users, so one command tore down both modules
+# with their devices bound. And a driver removal releases its devices, which
+# the remaining drivers immediately re-match - so the unbind has to be repeated
+# between the two teardowns, not done once up front.
+#
+# This never fired before the 7.2 update only because our module was installed
+# over the stock hid_asus, and the stock hid_asus_ally cannot load without it
+# ("Unknown symbol validate_mcu_fw_version"). The OS update restored the stock
+# module and wiped the blacklist, hid_asus_ally loaded for the first time, and
+# the modprobe -r below finally had something real to unload.
+unbind_ally_interfaces() {
+    local d dev drv n=0
+    for d in /sys/bus/hid/devices/0003:0B05:1ABE.* /sys/bus/hid/devices/0003:0B05:1B4C.*; do
+        [ -e "$d/uevent" ] || continue
+        [ -L "$d/driver" ] || continue
+        dev=$(basename "$d")
+        drv=$(basename "$(readlink -f "$d/driver")")
+        if echo "$dev" > "/sys/bus/hid/drivers/$drv/unbind" 2>/dev/null; then
+            n=$((n + 1))
+        else
+            warn "  Could not unbind $dev from $drv"
+        fi
+    done
+    [ "$n" -gt 0 ] && log "  Unbound $n Ally interface(s)"
+    return 0
+}
+
+# Our module and the in-kernel one are both called hid_asus, so no modprobe
+# blacklist can tell them apart - and udev reloads the stock one from its
+# modalias within seconds of the rmmod, re-binding interfaces before ours can
+# be inserted. Pausing udev's event queue holds the window open. The trap
+# matters: leaving the queue stopped after an error would break hotplug
+# system-wide until the next boot.
+UDEV_PAUSED=false
+resume_udev() {
+    [ "$UDEV_PAUSED" = true ] || return 0
+    UDEV_PAUSED=false
+    udevadm control --start-exec-queue 2>/dev/null \
+        || warn "Failed to resume udev. Run: sudo udevadm control --start-exec-queue"
+}
+if command -v udevadm >/dev/null 2>&1; then
+    if udevadm control --stop-exec-queue 2>/dev/null; then
+        UDEV_PAUSED=true
+        trap resume_udev EXIT
+    else
+        warn "Could not pause udev; the stock module may reload mid-swap."
     fi
 fi
-if lsmod | grep -q "hid_asus"; then
-    modprobe -r hid_asus || true
+
+unbind_ally_interfaces
+if lsmod | grep -q "^hid_asus_ally"; then
+    # rmmod, not `modprobe -r`: no dependency cascade, so the two teardowns
+    # stay separable and hid_asus is not removed out from under us here.
+    rmmod hid_asus_ally || warn "  Could not unload hid_asus_ally."
 fi
-modprobe hid-asus || true
+
+unbind_ally_interfaces
+if lsmod | grep -q "^hid_asus\b"; then
+    rmmod hid_asus || warn "  Could not unload the stock hid_asus."
+fi
+
+unbind_ally_interfaces
 modprobe "${MODULE_NAME//-/_}"
+
+resume_udev
+trap - EXIT
 
 log "Verifying installation..."
 if lsmod | grep -q "${MODULE_NAME//-/_}"; then

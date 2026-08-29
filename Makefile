@@ -1,6 +1,18 @@
-obj-m += hid-asus.o asus-wmi-stub.o
-
 KDIR ?= /lib/modules/$(shell uname -r)/build
+
+obj-m += hid-asus.o
+
+# asus-wmi-stub exists only for kernels whose asus-wmi does not export the
+# hid-asus listener API. Building it against one that DOES (SteamOS 7.2's
+# asus-wmi exports all three symbols) makes the stub a duplicate GPL export,
+# and modprobe then refuses to insert it - which takes hid-asus down with it,
+# since modules.dep lists the stub as a dependency. Decide per kernel.
+STUB_NEEDED := $(shell grep -qE '[[:space:]]asus_hid_register_listener[[:space:]]' \
+	$(KDIR)/Module.symvers 2>/dev/null && echo no || echo yes)
+
+ifeq ($(STUB_NEEDED),yes)
+obj-m += asus-wmi-stub.o
+endif
 
 all:
 	make -C $(KDIR) M=$(PWD) modules CONFIG_DEBUG_INFO_BTF_MODULES=
